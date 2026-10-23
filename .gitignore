@@ -1,0 +1,179 @@
+# ==============================================================================
+# Git Ignore Configuration for Full-Stack Face & Eye-Gaze Verification Project
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Environment Variables, Secrets & Credentials
+# ------------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.env
+*.pem
+*.key
+*.cert
+*.crt
+
+# ------------------------------------------------------------------------------
+# 2. Frontend (Node.js, Vite, React, npm/yarn/pnpm)
+# ------------------------------------------------------------------------------
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build and Production outputs
+dist/
+dist-ssr/
+build/
+out/
+
+# Vite & Bundler cache
+.vite/
+.parcel-cache/
+.eslintcache
+.stylelintcache
+
+# Testing & Coverage
+coverage/
+.nyc_output/
+playwright-report/
+test-results/
+
+# ------------------------------------------------------------------------------
+# 3. Backend (Python, FastAPI, MediaPipe, OpenCV)
+# ------------------------------------------------------------------------------
+# Bytecode and Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Packaging, builds & distributions
+*.egg-info/
+.eggs/
+eggs/
+*.egg
+build/
+develop-eggs/
+downloads/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+pip-wheel-metadata/
+
+# Testing & Linters cache
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+.ruff_cache/
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# ------------------------------------------------------------------------------
+# 4. Large Models, Machine Learning Checkpoints & Weights
+# ------------------------------------------------------------------------------
+# Pretrained weights / large binaries (can exceed GitHub's 100MB limit or bloat repo)
+*.onnx
+*.pt
+*.pth
+*.bin
+*.weights
+*.h5
+*.hdf5
+*.tflite
+*.pkl
+*.pickle
+*.joblib
+
+# ------------------------------------------------------------------------------
+# 5. Database, Local Storage & Session Data
+# ------------------------------------------------------------------------------
+*.db
+*.sqlite
+*.sqlite3
+*.dump
+
+# ------------------------------------------------------------------------------
+# 6. Uploads, Media, Recordings & Temporary Files
+# ------------------------------------------------------------------------------
+recordings/
+uploads/
+captures/
+temp/
+tmp/
+*.tmp
+
+# ------------------------------------------------------------------------------
+# 7. Logs & Debug Reports
+# ------------------------------------------------------------------------------
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ------------------------------------------------------------------------------
+# 8. Operating System & System Files
+# ------------------------------------------------------------------------------
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+.directory
+.fuse_hidden*
+
+# ------------------------------------------------------------------------------
+# 9. IDEs & Code Editors
+# ------------------------------------------------------------------------------
+# Visual Studio Code
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+
+# JetBrains (PyCharm, WebStorm, etc.)
+.idea/
+
+# Visual Studio / Windows tools
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
