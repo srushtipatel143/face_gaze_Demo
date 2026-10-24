@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { API_BASE } from './config';
 import './CameraCapture.css';
 
 /**
@@ -20,6 +21,7 @@ export default function CameraCapture({ onConfirmPhoto, confirmedPhoto = null })
 
   const [isValidating, setIsValidating] = useState(false);
   const [validationResult, setValidationResult] = useState(null);
+  const [validationIssues, setValidationIssues] = useState([]);
 
   // Stop all active tracks on the camera stream
   const stopCamera = useCallback(() => {
@@ -114,9 +116,7 @@ export default function CameraCapture({ onConfirmPhoto, confirmedPhoto = null })
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Mirror horizontal to match user mirror view
-    ctx.translate(width, 0);
-    ctx.scale(-1, 1);
+    // Draw raw unmirrored video frame directly to canvas for backend biometric analysis (L4)
     ctx.drawImage(video, 0, 0, width, height);
 
     // Export high-quality JPEG
@@ -129,6 +129,7 @@ export default function CameraCapture({ onConfirmPhoto, confirmedPhoto = null })
     setIsConfirmed(false);
     setError(null);
     setValidationResult(null);
+    setValidationIssues([]);
   };
 
   // Reset captured image and reactivate webcam
@@ -137,6 +138,7 @@ export default function CameraCapture({ onConfirmPhoto, confirmedPhoto = null })
     setIsConfirmed(false);
     setError(null);
     setValidationResult(null);
+    setValidationIssues([]);
     startCamera();
   };
 
@@ -146,9 +148,10 @@ export default function CameraCapture({ onConfirmPhoto, confirmedPhoto = null })
 
     setIsValidating(true);
     setError(null);
+    setValidationIssues([]);
 
     try {
-      const response = await fetch('http://localhost:8000/api/reference', {
+      const response = await fetch(`${API_BASE}/api/reference`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ image: capturedImage }),
@@ -162,6 +165,7 @@ export default function CameraCapture({ onConfirmPhoto, confirmedPhoto = null })
 
       if (!data.success) {
         setError(data.message || 'Face validation failed. Please retake the photo.');
+        setValidationIssues(data.issues || []);
         setIsValidating(false);
         return;
       }
@@ -169,6 +173,7 @@ export default function CameraCapture({ onConfirmPhoto, confirmedPhoto = null })
       // Valid single face detected and session created!
       setIsConfirmed(true);
       setValidationResult(data);
+      setValidationIssues([]);
       setIsValidating(false);
 
       if (onConfirmPhoto) {
@@ -209,11 +214,18 @@ export default function CameraCapture({ onConfirmPhoto, confirmedPhoto = null })
         <div className="camera-error-banner" role="alert">
           <div className="error-icon">⚠️</div>
           <div className="error-content">
-            <strong>Camera Error:</strong>
+            <strong>Photo Quality Issue:</strong>
             <p>{error}</p>
+            {validationIssues && validationIssues.length > 0 && (
+              <ul className="error-issues-list" style={{ marginTop: '0.45rem', paddingLeft: '1.2rem', fontSize: '0.85rem', color: '#fca5a5' }}>
+                {validationIssues.map((issue, idx) => (
+                  <li key={idx}>{issue}</li>
+                ))}
+              </ul>
+            )}
           </div>
-          <button className="error-retry-btn" onClick={startCamera}>
-            Retry
+          <button className="error-retry-btn" onClick={handleRetake}>
+            Retake
           </button>
         </div>
       )}
@@ -333,7 +345,7 @@ export default function CameraCapture({ onConfirmPhoto, confirmedPhoto = null })
               {isValidating
                 ? '⏳ Validating Face...'
                 : isConfirmed
-                ? '✓ Reference Confirmed'
+                ? '✓ Photo Accepted'
                 : '✓ Confirm Photo'}
             </button>
           </div>
@@ -345,9 +357,9 @@ export default function CameraCapture({ onConfirmPhoto, confirmedPhoto = null })
         <div className="confirmation-banner">
           <div className="banner-icon">🎯</div>
           <div className="banner-text">
-            <strong>Reference identity verified!</strong>
+            <strong>Reference photo accepted</strong>
             <p>
-              Phase 1 & Phase 2 complete. Face validated
+              Single clear face detected and validated
               {validationResult?.quality_score ? ` (Quality: ${validationResult.quality_score}%)` : ''}.
               {validationResult?.session_id ? ` Session ID: ${validationResult.session_id}` : ''}
             </p>

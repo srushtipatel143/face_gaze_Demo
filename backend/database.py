@@ -6,8 +6,16 @@ live verification events, and aggregate session metrics.
 
 import uuid
 import time
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 from threading import Lock
+
+# Delegate rules, interval tracking, and verdict evaluation to pure evaluator module (L10 & L7)
+from evaluator import (
+    IntervalTracker,
+    evaluate_face_verdict,
+    evaluate_gaze_verdict,
+    evaluate_session_records,
+)
 
 class SessionDatabase:
     def __init__(self):
@@ -33,12 +41,29 @@ class SessionDatabase:
                 "unmatched_frames": 0,
                 "no_face_frames": 0,
                 "multiple_faces_frames": 0,
+                "identity_unknown_frames": 0,
                 "looking_away_frames": 0,
                 "center_gaze_frames": 0,
-                "last_gaze_direction": "CENTER",
-                "last_verification_status": "MATCH",
+                "gaze_unknown_frames": 0,
+                "gaze_tracker": IntervalTracker("looking_away", open_after=5, close_after=3, max_gap_s=1.0, period_s=0.2),
+                "consecutive_no_match": 0,
+                "consecutive_multiple_faces": 0,
+                "consecutive_no_face": 0,
+                "consecutive_match": 0,
+                "active_identity_alert": None,
+                "baseline_samples": [],
+                "baseline": None,
+                "baseline_frames_required": 50,
+                "post_calib_total": 0,
+                "post_calib_away": 0,
+                "bad_baseline": False,
+                "trailing_on_screen_samples": [],
+                "blink_count": 0,
+                "recent_poses": [],
+                "static_face_detected": False,
                 "events": [],
                 "recent_similarities": [],
+                "records": [],
             }
         return session_id
 
@@ -48,13 +73,42 @@ class SessionDatabase:
             return self._sessions.get(session_id)
 
     def start_verification(self, session_id: str) -> bool:
-        """Mark a session as active for live verification."""
+        """Mark a session as active for live verification, resetting all counters if restarting (M6)."""
         with self._lock:
             sess = self._sessions.get(session_id)
             if not sess:
                 return False
+            if sess["status"] == "completed":
+                return False  # Refuse /start on completed session (M6)
             sess["status"] = "active"
             sess["start_time"] = time.time()
+            sess["end_time"] = None
+            sess["total_frames"] = 0
+            sess["matched_frames"] = 0
+            sess["unmatched_frames"] = 0
+            sess["no_face_frames"] = 0
+            sess["multiple_faces_frames"] = 0
+            sess["identity_unknown_frames"] = 0
+            sess["looking_away_frames"] = 0
+            sess["center_gaze_frames"] = 0
+            sess["gaze_unknown_frames"] = 0
+            sess["gaze_tracker"] = IntervalTracker(open_after=5, close_after=3, max_gap_s=1.0, period_s=0.2)
+            sess["baseline_samples"] = []
+            sess["baseline"] = None
+            sess["post_calib_total"] = 0
+            sess["post_calib_away"] = 0
+            sess["bad_baseline"] = False
+            sess["trailing_on_screen_samples"] = []
+            sess["blink_count"] = 0
+            sess["recent_poses"] = []
+            sess["static_face_detected"] = False
+            sess["consecutive_no_match"] = 0
+            sess["consecutive_multiple_faces"] = 0
+            sess["consecutive_no_face"] = 0
+            sess["consecutive_match"] = 0
+            sess["active_identity_alert"] = None
+            sess["events"] = []
+            sess["recent_similarities"] = []
             return True
 
     def add_frame_result(self, session_id: str, result: Dict[str, Any]) -> bool:
@@ -65,6 +119,33 @@ class SessionDatabase:
                 return False
             
             sess["total_frames"] += 1
+
+            # Extract per-frame record for pure evaluation at stop (L10)
+            now = time.time()
+            start_t = sess.get("start_time") or now
+            elapsed = now - start_t
+            idx = len(sess.get("records", []))
+            t_s = round(elapsed if elapsed >= (idx * 0.1) else idx * 0.2, 3)
+            t_ms = int(t_s * 1000)
+
+            rec = {
+                "t_ms": t_ms,
+                "t_s": t_s,
+                "faces_detected": result.get("faces_detected", 0),
+                "verification_status": result.get("verification_status", "UNKNOWN"),
+                "similarity": result.get("similarity"),
+                "is_match": result.get("is_match"),
+                "yaw": result.get("gaze_yaw") if result.get("gaze_yaw") is not None else result.get("telemetry", {}).get("yaw"),
+                "pitch": result.get("gaze_pitch") if result.get("gaze_pitch") is not None else result.get("telemetry", {}).get("pitch"),
+                "iris_h": result.get("iris_h") if result.get("iris_h") is not None else result.get("telemetry", {}).get("iris_h", 0.5),
+                "iris_v": result.get("iris_v") if result.get("iris_v") is not None else result.get("telemetry", {}).get("iris_v", 0.5),
+                "eyes_open": result.get("eyes_open", True) if "eyes_open" in result else result.get("telemetry", {}).get("eyes_open", True),
+                "gaze_direction": result.get("gaze_direction", "UNKNOWN"),
+                "is_looking_away": result.get("is_looking_away"),
+                "thumbnail": result.get("thumbnail"),
+            }
+            sess.setdefault("records", []).append(rec)
+
             status = result.get("verification_status")
             if status == "MATCH":
                 sess["matched_frames"] += 1
@@ -74,62 +155,173 @@ class SessionDatabase:
                 sess["no_face_frames"] += 1
             elif status == "MULTIPLE_FACES":
                 sess["multiple_faces_frames"] += 1
+            elif status == "UNKNOWN":
+                sess["identity_unknown_frames"] += 1
 
-            is_looking_away = result.get("is_looking_away", False)
-            gaze_dir = result.get("gaze_direction", "CENTER")
+            # Gaze counting: valid readings only count into looking_away_frames or center_gaze_frames.
+            # No-face, multiple-face, and eyes-closed (blinks) frames are counted as gaze_unknown_frames.
+            is_looking_away = result.get("is_looking_away")
+            gaze_dir = result.get("gaze_direction", "UNKNOWN")
 
-            if is_looking_away:
-                sess["looking_away_frames"] += 1
+            # Baseline calibration and stability tracking (M4)
+            if sess.get("baseline") is None:
+                if result.get("calibrating", False) and result.get("gaze_yaw") is not None and result.get("gaze_pitch") is not None:
+                    sess["baseline_samples"].append((
+                        result["gaze_yaw"],
+                        result["gaze_pitch"],
+                        result.get("iris_h", 0.5),
+                        result.get("iris_v", 0.5)
+                    ))
+                    if len(sess["baseline_samples"]) >= sess["baseline_frames_required"]:
+                        import statistics
+                        yaws = [s[0] for s in sess["baseline_samples"]]
+                        pitches = [s[1] for s in sess["baseline_samples"]]
+                        ihs = [s[2] for s in sess["baseline_samples"]]
+                        ivs = [s[3] for s in sess["baseline_samples"]]
+                        sess["baseline"] = {
+                            "yaw": round(float(statistics.median(yaws)), 2),
+                            "pitch": round(float(statistics.median(pitches)), 2),
+                            "iris_h": round(float(statistics.median(ihs)), 3),
+                            "iris_v": round(float(statistics.median(ivs)), 3)
+                        }
             else:
+                if is_looking_away is not None:
+                    if sess["post_calib_total"] < 50:
+                        sess["post_calib_total"] += 1
+                        if is_looking_away is True:
+                            sess["post_calib_away"] += 1
+                        if sess["post_calib_total"] >= 25 and (sess["post_calib_away"] / sess["post_calib_total"]) > 0.50:
+                            sess["bad_baseline"] = True
+
+                    # Trailing window for on-screen updates only (never allow away frames to shift baseline)
+                    if is_looking_away is False and result.get("gaze_yaw") is not None:
+                        sess["trailing_on_screen_samples"].append((
+                            result["gaze_yaw"],
+                            result["gaze_pitch"],
+                            result.get("iris_h", 0.5),
+                            result.get("iris_v", 0.5)
+                        ))
+                        if len(sess["trailing_on_screen_samples"]) > 100:
+                            sess["trailing_on_screen_samples"].pop(0)
+                        if len(sess["trailing_on_screen_samples"]) == 100:
+                            import statistics
+                            yaws = [s[0] for s in sess["trailing_on_screen_samples"]]
+                            pitches = [s[1] for s in sess["trailing_on_screen_samples"]]
+                            ihs = [s[2] for s in sess["trailing_on_screen_samples"]]
+                            ivs = [s[3] for s in sess["trailing_on_screen_samples"]]
+                            sess["baseline"] = {
+                                "yaw": round(float(statistics.median(yaws)), 2),
+                                "pitch": round(float(statistics.median(pitches)), 2),
+                                "iris_h": round(float(statistics.median(ihs)), 3),
+                                "iris_v": round(float(statistics.median(ivs)), 3)
+                            }
+
+            if is_looking_away is True:
+                sess["looking_away_frames"] += 1
+                gaze_state = "away"
+            elif is_looking_away is False:
                 sess["center_gaze_frames"] += 1
+                gaze_state = "ok"
+            else:
+                sess["gaze_unknown_frames"] += 1
+                gaze_state = "unknown"
+
+            current_time = time.time()
+
+            # Interval tracker for gaze look-away episodes (M3)
+            tracker_event = sess["gaze_tracker"].update(current_time, gaze_state)
+            if tracker_event == "OPENED":
+                self._internal_add_event(sess, "LOOKING_AWAY", {
+                    "direction": gaze_dir if gaze_dir != "UNKNOWN" else "LOOKING_AWAY",
+                    "yaw": result.get("gaze_yaw"),
+                    "pitch": result.get("gaze_pitch"),
+                    "message": f"User looked away ({gaze_dir.replace('_', ' ').lower() if gaze_dir != 'UNKNOWN' else 'sustained'})."
+                })
+            elif tracker_event == "CLOSED_OK":
+                self._internal_add_event(sess, "GAZE_RETURNED", {
+                    "message": "User eye-gaze returned to center focus."
+                })
 
             if "similarity" in result and result["similarity"] is not None:
                 sess["recent_similarities"].append(result["similarity"])
                 if len(sess["recent_similarities"]) > 60:
                     sess["recent_similarities"].pop(0)
 
-            # Auto-detect state transitions to create human-readable events
-            last_status = sess.get("last_verification_status")
-            last_gaze = sess.get("last_gaze_direction")
-            current_time = round(time.time(), 2)
-
-            if status != last_status:
-                if status == "NO_FACE":
-                    self._internal_add_event(sess, "FACE_LOST", {
-                        "message": "User face disappeared from camera view."
-                    })
-                elif status == "MULTIPLE_FACES":
-                    self._internal_add_event(sess, "MULTIPLE_FACES", {
-                        "message": f"Multiple faces detected ({result.get('faces_detected')} people). Potential integrity breach."
-                    })
-                elif status == "NO_MATCH":
+            # Identity hysteresis smoothing (M3)
+            # Require 3 consecutive frames to raise an identity alert, preventing single-frame jitters
+            if status == "NO_MATCH":
+                sess["consecutive_no_match"] += 1
+                sess["consecutive_match"] = 0
+                sess["consecutive_multiple_faces"] = 0
+                sess["consecutive_no_face"] = 0
+                if sess["consecutive_no_match"] >= 3 and sess["active_identity_alert"] != "NO_MATCH":
+                    sess["active_identity_alert"] = "NO_MATCH"
                     self._internal_add_event(sess, "IDENTITY_MISMATCH", {
                         "message": f"Face does not match reference identity (similarity: {result.get('similarity')})."
                     })
-                elif status == "UNKNOWN":
-                    self._internal_add_event(sess, "IDENTITY_UNCERTAIN", {
-                        "message": "Head angle turned far from camera (>35°); identity verification uncertain."
+            elif status == "MULTIPLE_FACES":
+                sess["consecutive_multiple_faces"] += 1
+                sess["consecutive_match"] = 0
+                sess["consecutive_no_match"] = 0
+                sess["consecutive_no_face"] = 0
+                if sess["consecutive_multiple_faces"] >= 3 and sess["active_identity_alert"] != "MULTIPLE_FACES":
+                    sess["active_identity_alert"] = "MULTIPLE_FACES"
+                    self._internal_add_event(sess, "MULTIPLE_FACES", {
+                        "message": f"Second face detected in camera view ({result.get('faces_detected')} faces visible)."
                     })
-                elif status == "MATCH" and last_status in ["NO_FACE", "MULTIPLE_FACES", "NO_MATCH", "UNKNOWN"]:
+            elif status == "NO_FACE":
+                sess["consecutive_no_face"] += 1
+                sess["consecutive_match"] = 0
+                sess["consecutive_no_match"] = 0
+                sess["consecutive_multiple_faces"] = 0
+                if sess["consecutive_no_face"] >= 3 and sess["active_identity_alert"] != "NO_FACE":
+                    sess["active_identity_alert"] = "NO_FACE"
+                    self._internal_add_event(sess, "FACE_LOST", {
+                        "message": "User face disappeared from camera view."
+                    })
+            elif status == "MATCH":
+                sess["consecutive_match"] += 1
+                sess["consecutive_no_match"] = 0
+                sess["consecutive_multiple_faces"] = 0
+                sess["consecutive_no_face"] = 0
+                if sess["consecutive_match"] >= 3 and sess["active_identity_alert"] is not None:
                     self._internal_add_event(sess, "FACE_RESTORED", {
                         "message": "Verified user face re-established in camera view."
                     })
-                sess["last_verification_status"] = status
+                    sess["active_identity_alert"] = None
+            else:
+                sess["consecutive_match"] = 0
+                sess["consecutive_no_match"] = 0
+                sess["consecutive_multiple_faces"] = 0
+                sess["consecutive_no_face"] = 0
 
-            # Gaze state transitions
-            if gaze_dir != last_gaze:
-                if is_looking_away and last_gaze == "CENTER":
-                    self._internal_add_event(sess, "LOOKING_AWAY", {
-                        "direction": gaze_dir,
-                        "yaw": result.get("gaze_yaw"),
-                        "pitch": result.get("gaze_pitch"),
-                        "message": f"User looked away ({gaze_dir.replace('_', ' ').lower()})."
-                    })
-                elif not is_looking_away and last_gaze != "CENTER":
-                    self._internal_add_event(sess, "GAZE_RETURNED", {
-                        "message": "User eye-gaze returned to center focus."
-                    })
-                sess["last_gaze_direction"] = gaze_dir
+            # Liveness / static photo detection (M8 cheap signal)
+            # Living humans blink 15-20 times per minute and exhibit involuntary micro-movements
+            if result.get("eyes_open") is False or (result.get("openness") is not None and result["openness"] < 0.18):
+                sess["blink_count"] += 1
+
+            if status == "MATCH" and result.get("gaze_yaw") is not None and result.get("gaze_pitch") is not None:
+                sess["recent_poses"].append((result["gaze_yaw"], result["gaze_pitch"]))
+                if len(sess["recent_poses"]) > 150:
+                    sess["recent_poses"].pop(0)
+
+                # After sustained matching (~30s, 150 frames) with 0 blinks and near-zero pose variance
+                if sess["matched_frames"] >= 150 and len(sess["recent_poses"]) >= 100 and sess["blink_count"] == 0:
+                    yaws = [p[0] for p in sess["recent_poses"]]
+                    pitches = [p[1] for p in sess["recent_poses"]]
+                    mean_yaw = sum(yaws) / len(yaws)
+                    mean_pitch = sum(pitches) / len(pitches)
+                    yaw_var = sum((y - mean_yaw) ** 2 for y in yaws) / len(yaws)
+                    pitch_var = sum((p - mean_pitch) ** 2 for p in pitches) / len(pitches)
+                    yaw_std = yaw_var ** 0.5
+                    pitch_std = pitch_var ** 0.5
+
+                    if yaw_std < 0.35 and pitch_std < 0.35:
+                        if not sess["static_face_detected"]:
+                            sess["static_face_detected"] = True
+                            self._internal_add_event(sess, "STATIC_FACE_WARNING", {
+                                "message": "Possible static photo detected: no natural blinks or head micro-movements in 30+ seconds."
+                            })
 
             return True
 
@@ -152,7 +344,7 @@ class SessionDatabase:
             return True
 
     def stop_session(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """Stop a session and calculate final summary statistics."""
+        """Stop a session and calculate final summary statistics and independent verdicts."""
         with self._lock:
             sess = self._sessions.get(session_id)
             if not sess:
@@ -162,36 +354,50 @@ class SessionDatabase:
             sess["end_time"] = time.time()
             start = sess.get("start_time") or sess.get("created_at")
             duration = max(1.0, round(sess["end_time"] - start, 1))
-            total = sess["total_frames"]
-
-            match_pct = round((sess["matched_frames"] / total * 100.0), 1) if total > 0 else 0.0
-            gaze_away_pct = round((sess["looking_away_frames"] / total * 100.0), 1) if total > 0 else 0.0
-
-            # Determine overall session verdict
-            if total >= 5 and match_pct >= 80.0 and gaze_away_pct <= 35.0 and sess["multiple_faces_frames"] == 0:
-                verdict = "PASSED"
-            elif match_pct >= 60.0 or gaze_away_pct > 35.0:
-                verdict = "SUSPICIOUS"
+            records = sess.get("records", [])
+            if records:
+                if duration <= 1.0 and records[-1].get("t_s", 0) > 1.0:
+                    duration = round(records[-1]["t_s"], 1)
+                summary = evaluate_session_records(
+                    records,
+                    duration_seconds=duration,
+                    bad_baseline=sess.get("bad_baseline", False)
+                )
             else:
-                verdict = "FAILED"
+                summary = {
+                    "duration_seconds": duration,
+                    "total_frames": sess["total_frames"],
+                    "matched_frames": sess["matched_frames"],
+                    "unmatched_frames": sess["unmatched_frames"],
+                    "no_face_frames": sess["no_face_frames"],
+                    "multiple_faces_frames": sess["multiple_faces_frames"],
+                    "match_percentage": 0.0,
+                    "looking_away_percentage": 0.0,
+                    "overall_verdict": "PASSED",
+                    "face": {"verdict": "FAIL", "reasons": ["no_data"]},
+                    "gaze": {"verdict": "REVIEW", "reasons": ["no_data"]},
+                    "metrics": {
+                        "valid_frames": 0, "fps": 5.0, "different_person_s": 0.0,
+                        "multiple_faces_s": 0.0, "no_face_s": 0.0, "no_face_pct": 0.0,
+                        "identity_unknown_s": 0.0, "identity_unknown_pct": 0.0,
+                        "gaze_valid_frames": 0, "away_s": 0.0, "away_pct": 0.0,
+                        "long_away_intervals": 0, "gaze_unknown_pct": 0.0,
+                        "bad_baseline": False, "static_face": False,
+                    },
+                    "intervals": [],
+                    "events": sess.get("events", [])
+                }
 
-            return {
-                "session_id": session_id,
-                "status": "completed",
-                "duration_seconds": duration,
-                "total_frames": total,
-                "matched_frames": sess["matched_frames"],
-                "unmatched_frames": sess["unmatched_frames"],
-                "no_face_frames": sess["no_face_frames"],
-                "multiple_faces_frames": sess["multiple_faces_frames"],
-                "match_percentage": match_pct,
-                "looking_away_percentage": gaze_away_pct,
-                "overall_verdict": verdict,
-                "events": sess["events"]
-            }
+            summary["session_id"] = session_id
+            summary["status"] = "completed"
 
-    def cleanup_old_sessions(self, max_age_seconds: int = 7200):
-        """Remove sessions older than max_age_seconds."""
+            # Discard reference biometric embedding now that verification session is concluded (L5)
+            sess["reference_embedding"] = None
+
+            return summary
+
+    def cleanup_old_sessions(self, max_age_seconds: int = 3600):
+        """Remove sessions older than max_age_seconds (L5)."""
         now = time.time()
         with self._lock:
             to_delete = [

@@ -9,6 +9,7 @@ Endpoints:
 - GET  /health: Service health check.
 """
 
+import os
 import time
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,11 +34,17 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Enable CORS for local Vite dev server and production preview
+# Configure CORS with explicit allowed origins and allow_credentials=False (L6)
+allowed_origins_env = os.getenv(
+    "ALLOWED_ORIGINS",
+    "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000"
+)
+allowed_origins = [orig.strip() for orig in allowed_origins_env.split(",") if orig.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=allowed_origins,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -71,6 +78,9 @@ def receive_reference_photo(req: ReferencePhotoRequest):
     3. Generates invariant 3D landmark biometric reference embedding
     4. Creates a temporary verification session
     """
+    # Clean up stale verification sessions (L5)
+    db.cleanup_old_sessions()
+
     try:
         image = engine.decode_base64_image(req.image)
     except Exception as e:
@@ -88,6 +98,7 @@ def receive_reference_photo(req: ReferencePhotoRequest):
             success=False,
             faces_detected=res.get("faces_detected", 0),
             quality_score=res.get("quality_score"),
+            issues=res.get("issues", []),
             message=res.get("message", "Reference face validation failed.")
         )
 
@@ -102,6 +113,7 @@ def receive_reference_photo(req: ReferencePhotoRequest):
         session_id=session_id,
         faces_detected=1,
         quality_score=res.get("quality_score", 100.0),
+        issues=[],
         message="Reference face validated. Session created successfully."
     )
 
@@ -118,7 +130,19 @@ def start_live_verification(req: VerificationStartRequest):
             detail=f"Session '{req.session_id}' not found. Please capture a reference photo first."
         )
 
-    db.start_verification(req.session_id)
+    if sess["status"] == "completed":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Session has already completed. Please capture a new reference photo to start a new session."
+        )
+
+    started = db.start_verification(req.session_id)
+    if not started:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to start session verification."
+        )
+
     return VerificationStartResponse(
         session_id=req.session_id,
         status="active",
@@ -130,7 +154,7 @@ def analyze_live_frame(req: FrameVerificationRequest):
     """
     Analyzes an incoming webcam frame:
     - Verifies face match against reference embedding
-    - Determines gaze direction & looking-away flag
+    - Determines gaze direction & looking-away flag relative to baseline (M4)
     - Calculates 3D head pose (yaw/pitch) and bounding box
     """
     sess = db.get_session(req.session_id)
@@ -140,10 +164,10 @@ def analyze_live_frame(req: FrameVerificationRequest):
             detail=f"Session '{req.session_id}' not found."
         )
 
-    if sess["status"] not in ["active", "initialized"]:
+    if sess["status"] != "active":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Session is currently {sess['status']}, not active."
+            detail=f"Session '{req.session_id}' is {sess['status']}, not active."
         )
 
     try:
@@ -155,7 +179,8 @@ def analyze_live_frame(req: FrameVerificationRequest):
         )
 
     ref_embedding = sess["reference_embedding"]
-    result = engine.process_live_frame(frame_image, ref_embedding)
+    baseline = sess.get("baseline")
+    result = engine.process_live_frame(frame_image, ref_embedding, baseline=baseline)
 
     # Record metrics and detect state change events in session database
     db.add_frame_result(req.session_id, result)
@@ -180,6 +205,9 @@ def analyze_live_frame(req: FrameVerificationRequest):
         is_looking_away=result["is_looking_away"],
         gaze_yaw=result.get("gaze_yaw"),
         gaze_pitch=result.get("gaze_pitch"),
+        iris_h=result.get("iris_h"),
+        iris_v=result.get("iris_v"),
+        calibrating=result.get("calibrating"),
         face_box=box,
         timestamp=time.time()
     )

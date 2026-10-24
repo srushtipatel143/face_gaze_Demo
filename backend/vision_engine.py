@@ -7,7 +7,7 @@ import base64
 import io
 import re
 from pathlib import Path
-from threading import Lock
+from threading import RLock
 import urllib.request
 from typing import Tuple, Optional, Dict, Any, List
 import numpy as np
@@ -16,6 +16,7 @@ import mediapipe as mp
 
 WEIGHTS = Path(__file__).parent / "weights"
 SFACE_MATCH_THRESHOLD = 0.363  # Cosine similarity threshold for OpenCV SFace
+EYES_OPEN_MIN = 0.18  # Eyelid gap / eye width ratio below which eyes are considered closed (blink)
 
 def ensure_weights():
     """Ensure ONNX model weights exist locally in backend/weights/."""
@@ -63,15 +64,14 @@ MODEL_POINTS_3D = np.array([
 class VisionEngine:
     def __init__(self):
         ensure_weights()
-        self._lock = Lock()
+        self._lock = RLock()
         self.mp_face_mesh = mp.solutions.face_mesh
-        # FaceMesh with iris refinement enabled (provides landmarks 468-477 for iris)
+        # FaceMesh with static_image_mode=True: each frame analyzed independently without cross-frame state leakage
         self.face_mesh = self.mp_face_mesh.FaceMesh(
-            static_image_mode=False,
+            static_image_mode=True,
             max_num_faces=4,
             refine_landmarks=True,
             min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
         )
         # Dedicated static face mesh for reference photo validation
         self.reference_face_mesh = self.mp_face_mesh.FaceMesh(
@@ -120,37 +120,47 @@ class VisionEngine:
     @staticmethod
     def assess_quality(image: np.ndarray, face_box: Optional[Dict[str, int]] = None) -> Tuple[float, List[str]]:
         """
-        Evaluate image brightness, sharpness/blur, and face area ratio.
+        Evaluate image brightness, sharpness/blur, and face area ratio on face crop.
         Returns a quality score (0-100) and any warning/failure reasons.
         """
         issues = []
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        h, w = gray.shape
+        h, w = image.shape[:2]
 
-        # 1. Sharpness / Blur check using Laplacian variance
-        laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
-        if laplacian_var < 45.0:
-            issues.append(f"Image appears blurry (sharpness: {laplacian_var:.1f}, min: 45.0)")
-
-        # 2. Brightness check
-        mean_brightness = float(np.mean(gray))
-        if mean_brightness < 40.0:
-            issues.append(f"Lighting is too dark (brightness: {mean_brightness:.1f}/255, min: 40)")
-        elif mean_brightness > 225.0:
-            issues.append(f"Lighting is overexposed (brightness: {mean_brightness:.1f}/255, max: 225)")
-
-        # 3. Face size ratio check
-        face_ratio = 0.0
+        # Extract face crop for localized blur and lighting assessment (M7)
         if face_box:
-            face_area = face_box["width"] * face_box["height"]
+            fx = max(0, face_box["x"])
+            fy = max(0, face_box["y"])
+            fw = max(1, min(w - fx, face_box["width"]))
+            fh = max(1, min(h - fy, face_box["height"]))
+            face_crop = image[fy:fy + fh, fx:fx + fw]
+            face_area = fw * fh
             img_area = w * h
             face_ratio = face_area / float(img_area)
-            if face_ratio < 0.05:
-                issues.append("Face is too far from the camera. Please move closer.")
+            if face_ratio < 0.05 or fw < 80 or fh < 80:
+                issues.append("Face is too small or too far from the camera. Please move closer.")
+        else:
+            face_crop = image
+
+        if face_crop.size == 0:
+            face_crop = image
+
+        face_gray = cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY)
+
+        # 1. Sharpness / Blur check on face crop using Laplacian variance
+        laplacian_var = float(cv2.Laplacian(face_gray, cv2.CV_64F).var())
+        if laplacian_var < 55.0:
+            issues.append(f"Face is blurry (sharpness: {laplacian_var:.1f}, min: 55.0). Please hold still and refocus.")
+
+        # 2. Brightness check on face crop
+        mean_brightness = float(np.mean(face_gray))
+        if mean_brightness < 45.0:
+            issues.append(f"Face lighting is too dark (brightness: {mean_brightness:.1f}/255, min: 45.0). Please face a light source.")
+        elif mean_brightness > 220.0:
+            issues.append(f"Face lighting is overexposed (brightness: {mean_brightness:.1f}/255, max: 220.0). Please reduce direct glare.")
 
         # Compute composite quality score (0 - 100)
-        sharpness_score = min(100.0, (laplacian_var / 120.0) * 50.0)
-        brightness_score = 50.0 - abs(mean_brightness - 128.0) * (50.0 / 128.0)
+        sharpness_score = min(60.0, (laplacian_var / 120.0) * 60.0)
+        brightness_score = 40.0 - abs(mean_brightness - 128.0) * (40.0 / 128.0)
         quality_score = max(5.0, min(100.0, round(sharpness_score + brightness_score, 1)))
 
         return quality_score, issues
@@ -247,25 +257,37 @@ class VisionEngine:
         return round(pitch, 2), round(yaw, 2), round(roll, 2)
 
     @staticmethod
-    def estimate_iris_gaze(landmarks, img_w: int, img_h: int) -> Tuple[float, float]:
+    def eye_openness(pts, top: int, bottom: int, outer: int, inner: int) -> float:
+        """Compute eyelid vertical gap divided by eye horizontal width."""
+        gap = abs(pts[bottom].y - pts[top].y)
+        width = abs(pts[inner].x - pts[outer].x) + 1e-6
+        return float(gap / width)
+
+    @classmethod
+    def estimate_iris_gaze(cls, landmarks, img_w: int, img_h: int) -> Tuple[float, float, float, bool]:
         """
-        Calculate iris pupil horizontal and vertical position ratios within the eye boundaries.
-        0.5 = dead center gaze.
-        < 0.40 = gaze shifted left.
-        > 0.60 = gaze shifted right.
+        Calculate eye openness, iris horizontal and vertical position ratios across both eyes.
+        Returns: (avg_h_ratio, avg_v_ratio, avg_openness, eyes_open)
         """
         pts = landmarks.landmark
         if len(pts) < 478:
-            return 0.5, 0.5
+            return 0.5, 0.5, 0.25, True
 
-        # Left eye (indices 33 outer, 133 inner, 468 iris center)
+        # Openness calculation for both eyes
+        # Left eye: top lid 159, bottom lid 145, outer corner 33, inner corner 133
+        left_open = cls.eye_openness(pts, 159, 145, 33, 133)
+        # Right eye: top lid 386, bottom lid 374, outer corner 263, inner corner 362
+        right_open = cls.eye_openness(pts, 386, 374, 263, 362)
+        avg_openness = float((left_open + right_open) / 2.0)
+        eyes_open = avg_openness >= EYES_OPEN_MIN
+
+        # Horizontal ratio (Left eye: 33 outer, 133 inner, 468 iris; Right eye: 362 inner, 263 outer, 473 iris)
         left_outer = pts[33].x
         left_inner = pts[133].x
         left_iris = pts[468].x
         left_eye_w = abs(left_inner - left_outer) + 1e-6
         left_h_ratio = (left_iris - min(left_outer, left_inner)) / left_eye_w
 
-        # Right eye (indices 362 inner, 263 outer, 473 iris center)
         right_inner = pts[362].x
         right_outer = pts[263].x
         right_iris = pts[473].x
@@ -274,213 +296,306 @@ class VisionEngine:
 
         avg_h_ratio = float((left_h_ratio + right_h_ratio) / 2.0)
 
-        # Vertical ratio (eyelid top 159, bottom 145)
-        top_lid = pts[159].y
-        bot_lid = pts[145].y
-        iris_y = pts[468].y
-        eye_h = abs(bot_lid - top_lid) + 1e-6
-        v_ratio = float((iris_y - top_lid) / eye_h)
+        # Vertical ratio using both eyes (Left iris 468, lids 159/145; Right iris 473, lids 386/374)
+        left_eye_h = abs(pts[145].y - pts[159].y) + 1e-6
+        left_v_ratio = (pts[468].y - min(pts[159].y, pts[145].y)) / left_eye_h
 
-        return round(avg_h_ratio, 3), round(v_ratio, 3)
+        right_eye_h = abs(pts[374].y - pts[386].y) + 1e-6
+        right_v_ratio = (pts[473].y - min(pts[386].y, pts[374].y)) / right_eye_h
+
+        avg_v_ratio = float((left_v_ratio + right_v_ratio) / 2.0)
+
+        return round(avg_h_ratio, 3), round(avg_v_ratio, 3), round(avg_openness, 3), eyes_open
 
     def analyze_gaze(
-        self, landmarks, img_w: int, img_h: int, yaw_thresh: float = 14.0, pitch_thresh: float = 12.0
+        self, landmarks, img_w: int, img_h: int, baseline: Optional[Dict[str, float]] = None
     ) -> Dict[str, Any]:
         """
-        Classify gaze direction and looking-away status by combining head pose (yaw/pitch)
-        and iris position.
+        Classify gaze direction and looking-away status.
+        If baseline is provided, classifies relative to the user's calibrated on-screen gaze (M4).
+        If baseline is None, returns CALIBRATING with is_looking_away=None.
         """
         pitch, yaw, roll = self.estimate_head_pose(landmarks, img_w, img_h)
-        iris_h, iris_v = self.estimate_iris_gaze(landmarks, img_w, img_h)
+        iris_h, iris_v, openness, eyes_open = self.estimate_iris_gaze(landmarks, img_w, img_h)
+
+        if not eyes_open:
+            return {
+                "gaze_direction": "UNKNOWN",
+                "is_looking_away": None,
+                "eyes_open": False,
+                "openness": openness,
+                "yaw": yaw,
+                "pitch": pitch,
+                "roll": roll,
+                "iris_h": iris_h,
+                "iris_v": iris_v,
+                "calibrating": False
+            }
+
+        if baseline is None:
+            # Baseline is still being collected
+            return {
+                "gaze_direction": "CALIBRATING",
+                "is_looking_away": None,
+                "eyes_open": True,
+                "openness": openness,
+                "yaw": yaw,
+                "pitch": pitch,
+                "roll": roll,
+                "iris_h": iris_h,
+                "iris_v": iris_v,
+                "calibrating": True
+            }
+
+        # Baseline-relative classification (M4)
+        by = baseline.get("yaw", 0.0)
+        bp = baseline.get("pitch", 0.0)
+        bh = baseline.get("iris_h", 0.5)
+        bv = baseline.get("iris_v", 0.5)
+
+        delta_yaw = yaw - by
+        delta_pitch = pitch - bp
+        delta_iris_h = iris_h - bh
+        delta_iris_v = iris_v - bv
 
         direction = "CENTER"
         is_looking_away = False
-
-        # Check Horizontal displacement (Yaw or Iris)
-        if yaw < -yaw_thresh or iris_h < 0.38:
+        # Gaze / Orientation Direction Convention (L4):
+        # All directions ('LOOKING_LEFT', 'LOOKING_RIGHT', 'LOOKING_UP', 'LOOKING_DOWN')
+        # are explicitly defined from the USER's perspective (subject-centric / egocentric).
+        #
+        # In the unmirrored raw camera feed:
+        # - Turning/looking towards USER'S LEFT:
+        #     * Head yaw rotates negative in SolvePnP: delta_yaw < -20.0°
+        #     * Irises shift toward camera-right (+X in image): delta_iris_h > 0.15
+        # - Turning/looking towards USER'S RIGHT:
+        #     * Head yaw rotates positive in SolvePnP: delta_yaw > 20.0°
+        #     * Irises shift toward camera-left (-X in image): delta_iris_h < -0.15
+        if delta_yaw < -20.0 or delta_iris_h > 0.15:
             direction = "LOOKING_LEFT"
             is_looking_away = True
-        elif yaw > yaw_thresh or iris_h > 0.62:
+        elif delta_yaw > 20.0 or delta_iris_h < -0.15:
             direction = "LOOKING_RIGHT"
             is_looking_away = True
-        # Check Vertical displacement (Pitch or Iris)
-        elif pitch > pitch_thresh or iris_v < 0.30:
-            direction = "LOOKING_UP"
-            is_looking_away = True
-        elif pitch < -pitch_thresh or iris_v > 0.70:
+        # Vertical check: pitch positive = looking up, pitch negative = looking down
+        # Looking down gets a tighter limit (e.g. 15° below baseline) as people look at phones/notes
+        elif delta_pitch < -15.0 or (delta_pitch < -8.0 and delta_iris_v > 0.16):
             direction = "LOOKING_DOWN"
+            is_looking_away = True
+        elif delta_pitch > 18.0 or (delta_pitch > 10.0 and delta_iris_v < -0.16):
+            direction = "LOOKING_UP"
             is_looking_away = True
 
         return {
             "gaze_direction": direction,
             "is_looking_away": is_looking_away,
+            "eyes_open": True,
+            "openness": openness,
             "yaw": yaw,
             "pitch": pitch,
             "roll": roll,
             "iris_h": iris_h,
-            "iris_v": iris_v
+            "iris_v": iris_v,
+            "calibrating": False
         }
 
     def process_reference_image(self, image: np.ndarray) -> Dict[str, Any]:
         """
         Analyze reference photo for Phase 2:
         - Detect faces with YuNet (reject if != 1)
-        - Validate quality
+        - Validate quality on face crop (sharpness, lighting, scale)
+        - Validate frontal head pose and open eyes (M7)
         - Generate reference SFace embedding
+        All operations are thread-safe and guarded by self._lock.
         """
         h, w = image.shape[:2]
-        faces = self.detect_faces(image)
+        with self._lock:
+            faces = self.detect_faces(image)
 
-        if len(faces) == 0:
-            return {
-                "success": False,
-                "faces_detected": 0,
-                "message": "No face detected. Please ensure your face is well-lit and directly facing the webcam."
+            if len(faces) == 0:
+                return {
+                    "success": False,
+                    "faces_detected": 0,
+                    "issues": ["No face detected"],
+                    "message": "No face detected. Please ensure your face is well-lit and directly facing the webcam."
+                }
+
+            face_count = len(faces)
+            if face_count > 1:
+                return {
+                    "success": False,
+                    "faces_detected": face_count,
+                    "issues": [f"Multiple faces detected ({face_count})"],
+                    "message": f"Multiple faces detected ({face_count}). Only one person should be present in the photo."
+                }
+
+            face_row = faces[0]
+            face_box = {
+                "x": max(0, int(face_row[0])),
+                "y": max(0, int(face_row[1])),
+                "width": int(face_row[2]),
+                "height": int(face_row[3])
             }
+            quality_score, issues = self.assess_quality(image, face_box)
 
-        face_count = len(faces)
-        if face_count > 1:
+            # Check head pose (must be frontal within ±15°) and eyes open (M7)
+            rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            mesh_results = self.face_mesh.process(rgb)
+            if not mesh_results.multi_face_landmarks:
+                issues.append("Could not detect facial landmarks. Ensure face is unobstructed and facing camera.")
+            else:
+                landmarks = mesh_results.multi_face_landmarks[0]
+                pitch, yaw, _ = self.estimate_head_pose(landmarks, w, h)
+                if abs(yaw) > 15.0 or abs(pitch) > 15.0:
+                    issues.append(f"Face is turned away (yaw: {yaw:.1f}°, pitch: {pitch:.1f}°, maximum ±15°). Please look straight at the camera.")
+                _, _, openness, eyes_open = self.estimate_iris_gaze(landmarks, w, h)
+                if not eyes_open:
+                    issues.append(f"Eyes appear closed or blinking (openness: {openness:.2f}, min: {EYES_OPEN_MIN}). Please keep eyes open.")
+
+            # Strict quality gate: reject reference photo if any blocking issue is detected
+            if len(issues) > 0:
+                return {
+                    "success": False,
+                    "faces_detected": 1,
+                    "quality_score": quality_score,
+                    "issues": issues,
+                    "message": f"Reference photo rejected: {'; '.join(issues)}"
+                }
+
+            embedding = self.compute_embedding(image, face_row)
+
             return {
-                "success": False,
-                "faces_detected": face_count,
-                "message": f"Multiple faces detected ({face_count}). Only one person should be present in the photo."
-            }
-
-        face_row = faces[0]
-        face_box = {
-            "x": max(0, int(face_row[0])),
-            "y": max(0, int(face_row[1])),
-            "width": int(face_row[2]),
-            "height": int(face_row[3])
-        }
-        quality_score, issues = self.assess_quality(image, face_box)
-
-        if quality_score < 30.0 and len(issues) > 0:
-            return {
-                "success": False,
+                "success": True,
                 "faces_detected": 1,
                 "quality_score": quality_score,
-                "message": f"Photo quality insufficient: {'; '.join(issues)}"
+                "embedding": embedding,
+                "face_box": face_box,
+                "issues": [],
+                "metadata": {
+                    "width": w,
+                    "height": h,
+                    "quality_score": quality_score,
+                    "issues": issues
+                },
+                "message": "Reference face successfully validated and embedding generated."
             }
 
-        embedding = self.compute_embedding(image, face_row)
-
-        return {
-            "success": True,
-            "faces_detected": 1,
-            "quality_score": quality_score,
-            "embedding": embedding,
-            "face_box": face_box,
-            "metadata": {
-                "width": w,
-                "height": h,
-                "quality_score": quality_score,
-                "issues": issues
-            },
-            "message": "Reference face successfully validated and embedding generated."
-        }
-
-    def process_live_frame(self, image: np.ndarray, reference_embedding: np.ndarray) -> Dict[str, Any]:
+    def process_live_frame(
+        self, image: np.ndarray, reference_embedding: np.ndarray, baseline: Optional[Dict[str, float]] = None
+    ) -> Dict[str, Any]:
         """
         Analyze real-time frame for Phase 3 & Phase 4:
         - Count faces using YuNet
         - Compute live face embedding & match similarity using SFace
-        - Compute gaze direction & head pose using MediaPipe Face Mesh
+        - Compute gaze direction & head pose relative to baseline (M4) using MediaPipe Face Mesh in static mode
+        All operations are thread-safe and guarded by self._lock.
         """
         h, w = image.shape[:2]
-        faces = self.detect_faces(image)
-        face_count = len(faces)
-
-        if face_count == 0:
-            return {
-                "faces_detected": 0,
-                "verification_status": "NO_FACE",
-                "similarity": None,
-                "is_match": False,
-                "gaze_direction": "UNKNOWN",
-                "is_looking_away": True,
-                "gaze_yaw": None,
-                "gaze_pitch": None,
-                "face_box": None
-            }
-
-        if face_count > 1:
-            first_face = faces[0]
-            first_box = {
-                "x": max(0, int(first_face[0])),
-                "y": max(0, int(first_face[1])),
-                "width": int(first_face[2]),
-                "height": int(first_face[3])
-            }
-            return {
-                "faces_detected": face_count,
-                "verification_status": "MULTIPLE_FACES",
-                "similarity": None,
-                "is_match": False,
-                "gaze_direction": "UNKNOWN",
-                "is_looking_away": True,
-                "gaze_yaw": None,
-                "gaze_pitch": None,
-                "face_box": first_box
-            }
-
-        # Exactly 1 face detected by YuNet
-        face_row = faces[0]
-        face_box = {
-            "x": max(0, int(face_row[0])),
-            "y": max(0, int(face_row[1])),
-            "width": int(face_row[2]),
-            "height": int(face_row[3])
-        }
-
-        # Compute SFace embedding and cosine similarity
-        live_embedding = self.compute_embedding(image, face_row)
-        similarity = self.compute_similarity(reference_embedding, live_embedding)
-
-        # Head pose & eye-gaze tracking via MediaPipe Face Mesh
-        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         with self._lock:
+            faces = self.detect_faces(image)
+            face_count = len(faces)
+
+            if face_count == 0:
+                return {
+                    "faces_detected": 0,
+                    "verification_status": "NO_FACE",
+                    "similarity": None,
+                    "is_match": False,
+                    "gaze_direction": "UNKNOWN",
+                    "is_looking_away": None,
+                    "gaze_yaw": None,
+                    "gaze_pitch": None,
+                    "iris_h": None,
+                    "iris_v": None,
+                    "calibrating": False,
+                    "face_box": None
+                }
+
+            if face_count > 1:
+                first_face = faces[0]
+                first_box = {
+                    "x": max(0, int(first_face[0])),
+                    "y": max(0, int(first_face[1])),
+                    "width": int(first_face[2]),
+                    "height": int(first_face[3])
+                }
+                return {
+                    "faces_detected": face_count,
+                    "verification_status": "MULTIPLE_FACES",
+                    "similarity": None,
+                    "is_match": False,
+                    "gaze_direction": "UNKNOWN",
+                    "is_looking_away": None,
+                    "gaze_yaw": None,
+                    "gaze_pitch": None,
+                    "iris_h": None,
+                    "iris_v": None,
+                    "calibrating": False,
+                    "face_box": first_box
+                }
+
+            # Exactly 1 face detected by YuNet
+            face_row = faces[0]
+            face_box = {
+                "x": max(0, int(face_row[0])),
+                "y": max(0, int(face_row[1])),
+                "width": int(face_row[2]),
+                "height": int(face_row[3])
+            }
+
+            # Compute SFace embedding and cosine similarity
+            live_embedding = self.compute_embedding(image, face_row)
+            similarity = self.compute_similarity(reference_embedding, live_embedding)
+
+            # Head pose & eye-gaze tracking via MediaPipe Face Mesh
+            rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             mesh_results = self.face_mesh.process(rgb)
 
-        if mesh_results.multi_face_landmarks:
-            landmarks = mesh_results.multi_face_landmarks[0]
-            gaze_res = self.analyze_gaze(landmarks, w, h)
-        else:
-            gaze_res = {
-                "gaze_direction": "CENTER",
-                "is_looking_away": False,
-                "yaw": 0.0,
-                "pitch": 0.0,
-                "roll": 0.0,
-                "iris_h": 0.5,
-                "iris_v": 0.5
+            if mesh_results.multi_face_landmarks:
+                landmarks = mesh_results.multi_face_landmarks[0]
+                gaze_res = self.analyze_gaze(landmarks, w, h, baseline=baseline)
+            else:
+                gaze_res = {
+                    "gaze_direction": "UNKNOWN",
+                    "is_looking_away": None,
+                    "yaw": None,
+                    "pitch": None,
+                    "roll": None,
+                    "iris_h": None,
+                    "iris_v": None,
+                    "calibrating": False
+                }
+
+            yaw = gaze_res.get("yaw", 0.0)
+            pitch = gaze_res.get("pitch", 0.0)
+
+            # Verification threshold: similarity >= 0.363 indicates same face identity
+            # Extreme head angles (>35° yaw or pitch) degrade facial recognition accuracy;
+            # mark as UNKNOWN rather than NO_MATCH to prevent false alarms.
+            is_match = similarity >= SFACE_MATCH_THRESHOLD
+            if is_match:
+                verification_status = "MATCH"
+            elif (yaw is not None and abs(yaw) > 35.0) or (pitch is not None and abs(pitch) > 35.0):
+                verification_status = "UNKNOWN"
+            else:
+                verification_status = "NO_MATCH"
+
+            return {
+                "faces_detected": 1,
+                "verification_status": verification_status,
+                "similarity": round(float(similarity), 4),
+                "is_match": is_match,
+                "gaze_direction": gaze_res["gaze_direction"],
+                "is_looking_away": gaze_res["is_looking_away"],
+                "eyes_open": gaze_res.get("eyes_open", True),
+                "openness": gaze_res.get("openness"),
+                "gaze_yaw": gaze_res["yaw"],
+                "gaze_pitch": gaze_res["pitch"],
+                "iris_h": gaze_res.get("iris_h"),
+                "iris_v": gaze_res.get("iris_v"),
+                "calibrating": gaze_res.get("calibrating", False),
+                "face_box": face_box
             }
-
-        yaw = gaze_res.get("yaw", 0.0)
-        pitch = gaze_res.get("pitch", 0.0)
-
-        # Verification threshold: similarity >= 0.363 indicates same face identity
-        # Extreme head angles (>35° yaw or pitch) degrade facial recognition accuracy;
-        # mark as UNKNOWN rather than NO_MATCH to prevent false alarms.
-        is_match = similarity >= SFACE_MATCH_THRESHOLD
-        if is_match:
-            verification_status = "MATCH"
-        elif (yaw is not None and abs(yaw) > 35.0) or (pitch is not None and abs(pitch) > 35.0):
-            verification_status = "UNKNOWN"
-        else:
-            verification_status = "NO_MATCH"
-
-        return {
-            "faces_detected": 1,
-            "verification_status": verification_status,
-            "similarity": round(float(similarity), 4),
-            "is_match": is_match,
-            "gaze_direction": gaze_res["gaze_direction"],
-            "is_looking_away": gaze_res["is_looking_away"],
-            "gaze_yaw": gaze_res["yaw"],
-            "gaze_pitch": gaze_res["pitch"],
-            "face_box": face_box
-        }
 
 
 # Singleton instance

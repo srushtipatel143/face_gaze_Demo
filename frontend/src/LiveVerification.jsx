@@ -1,7 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { API_BASE } from './config';
 import './LiveVerification.css';
-
-const API_BASE = 'http://localhost:8000';
 
 export default function LiveVerification({ sessionId, referencePhoto, onStopVerification, onBackToCapture }) {
   const videoRef = useRef(null);
@@ -23,6 +22,9 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
     lookingAway: 0,
   });
   const [isStopping, setIsStopping] = useState(false);
+  const [connectionWarning, setConnectionWarning] = useState(null);
+  const [fatalSessionError, setFatalSessionError] = useState(null);
+  const consecutiveFailuresRef = useRef(0);
 
   // Stop camera tracks cleanly
   const stopCamera = useCallback(() => {
@@ -46,21 +48,23 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
     const canvas = canvasRef.current;
     if (!video || !canvas || isProcessingRef.current || video.readyState < 2) return;
 
-    const width = video.videoWidth || 640;
-    const height = video.videoHeight || 480;
+    const rawWidth = video.videoWidth || 640;
+    const rawHeight = video.videoHeight || 480;
 
-    canvas.width = width;
-    canvas.height = height;
+    // Scale capture canvas to target ~640px wide for reduced payload & latency (L3)
+    const targetWidth = Math.min(640, rawWidth);
+    const targetHeight = Math.round((targetWidth / rawWidth) * rawHeight);
+
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Draw video frame to off-screen canvas (mirrored to match user perspective)
-    ctx.translate(width, 0);
-    ctx.scale(-1, 1);
-    ctx.drawImage(video, 0, 0, width, height);
-    ctx.setTransform(1, 0, 0, 1, 0, 0); // reset transform
+    // Draw raw unmirrored video frame to canvas for backend biometric & gaze analysis (L4)
+    ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
 
-    const base64Image = canvas.toDataURL('image/jpeg', 0.85);
+    // Use JPEG quality 0.70 for live stream frames (L3)
+    const base64Image = canvas.toDataURL('image/jpeg', 0.70);
 
     isProcessingRef.current = true;
     try {
@@ -74,10 +78,32 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
       });
 
       if (!response.ok) {
+        if (response.status === 400 || response.status === 404) {
+          // Fatal session error: session completed, inactive, or missing from memory (M5)
+          const errData = await response.json().catch(() => ({}));
+          const errMsg = errData.detail || `Session is no longer active (HTTP ${response.status}). Please start a new session.`;
+          setFatalSessionError(errMsg);
+          setLatestFrame(null);
+          if (intervalRef.current) {
+            clearInterval(intervalRef.current);
+            intervalRef.current = null;
+          }
+          const overlay = overlayCanvasRef.current;
+          if (overlay) {
+            const overlayCtx = overlay.getContext('2d');
+            if (overlayCtx) overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+          }
+          return;
+        }
         throw new Error(`Frame analysis failed (${response.status})`);
       }
 
       const data = await response.json();
+
+      // Reset failure streak on success (M5)
+      consecutiveFailuresRef.current = 0;
+      setConnectionWarning(null);
+
       setLatestFrame(data);
 
       // Update local rolling stats
@@ -87,7 +113,7 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
         else if (data.verification_status === 'NO_MATCH') next.unmatched += 1;
         else if (data.verification_status === 'NO_FACE') next.noFace += 1;
 
-        if (data.is_looking_away) next.lookingAway += 1;
+        if (data.is_looking_away === true) next.lookingAway += 1;
         return next;
       });
 
@@ -100,14 +126,31 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
         addLocalEvent('❌ Identity Mismatch', `Similarity: ${(data.similarity * 100).toFixed(1)}%`, 'danger');
       } else if (data.verification_status === 'UNKNOWN') {
         addLocalEvent('⚠️ Angle Too Steep', 'Face turned far from camera (>35° yaw/pitch)', 'warning');
-      } else if (data.is_looking_away) {
+      } else if (data.calibrating || data.gaze_direction === 'CALIBRATING') {
+        // Calibrating baseline gaze
+      } else if (data.is_looking_away === true) {
         addLocalEvent('👀 Looking Away', `Direction: ${data.gaze_direction.replace('_', ' ')}`, 'warning');
       }
 
-      // Draw bounding box & landmark indicators on overlay canvas
-      drawOverlay(data, width, height);
+      // Draw bounding box & landmark indicators on overlay canvas (scale box coordinates if downscaled)
+      drawOverlay(data, rawWidth, rawHeight, targetWidth, targetHeight);
     } catch (err) {
       console.warn('Frame processing glitch:', err.message);
+      consecutiveFailuresRef.current += 1;
+      // After 3 consecutive failures, clear latestFrame, show warning banner, and grey out overlay (M5)
+      if (consecutiveFailuresRef.current >= 3) {
+        setLatestFrame(null);
+        setConnectionWarning('Lost connection to the verification service. Attempting to reconnect...');
+        const overlay = overlayCanvasRef.current;
+        if (overlay) {
+          const overlayCtx = overlay.getContext('2d');
+          if (overlayCtx) {
+            overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+            overlayCtx.fillStyle = 'rgba(15, 23, 42, 0.65)';
+            overlayCtx.fillRect(0, 0, overlay.width, overlay.height);
+          }
+        }
+      }
     } finally {
       isProcessingRef.current = false;
     }
@@ -126,7 +169,7 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
   };
 
   // Draw overlay bounding box on top of the live stream
-  const drawOverlay = (frameData, vidW, vidH) => {
+  const drawOverlay = (frameData, vidW, vidH, sentW, sentH) => {
     const overlay = overlayCanvasRef.current;
     if (!overlay) return;
 
@@ -136,10 +179,18 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
     ctx.clearRect(0, 0, vidW, vidH);
 
     if (frameData.face_box) {
-      const { x, y, width, height } = frameData.face_box;
+      const fb = frameData.face_box;
+      const scaleX = sentW ? vidW / sentW : 1.0;
+      const scaleY = sentH ? vidH / sentH : 1.0;
 
-      // Because video is mirrored horizontally:
-      const mirrorX = vidW - (x + width);
+      const x = fb.x * scaleX;
+      const y = fb.y * scaleY;
+      const width = fb.width * scaleX;
+      const height = fb.height * scaleY;
+
+      // Because the <video> element is mirrored in the UI via CSS (transform: scaleX(-1))
+      // for a natural mirror-view user experience, map raw camera box X to screen display X (L4):
+      const displayX = vidW - (x + width);
 
       let strokeColor = '#10B981'; // Green for match & center
       let statusText = 'VERIFIED MATCH';
@@ -153,49 +204,49 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
       } else if (frameData.verification_status === 'MULTIPLE_FACES') {
         strokeColor = '#DC2626';
         statusText = 'MULTIPLE FACES';
-      } else if (frameData.is_looking_away) {
+      } else if (frameData.is_looking_away === true) {
         strokeColor = '#F59E0B';
-        statusText = `MATCH • ${frameData.gaze_direction.replace('_', ' ')}`;
+        statusText = `MATCH • ${frameData.gaze_direction ? frameData.gaze_direction.replace('_', ' ') : 'LOOKING AWAY'}`;
       }
 
       // Rounded Bounding Box
       ctx.lineWidth = 3;
       ctx.strokeStyle = strokeColor;
-      ctx.strokeRect(mirrorX, y, width, height);
+      ctx.strokeRect(displayX, y, width, height);
 
       // Corner Accents
       const cLen = Math.min(24, width * 0.2);
       ctx.lineWidth = 5;
       ctx.beginPath();
       // Top-Left
-      ctx.moveTo(mirrorX, y + cLen);
-      ctx.lineTo(mirrorX, y);
-      ctx.lineTo(mirrorX + cLen, y);
+      ctx.moveTo(displayX, y + cLen);
+      ctx.lineTo(displayX, y);
+      ctx.lineTo(displayX + cLen, y);
       // Top-Right
-      ctx.moveTo(mirrorX + width - cLen, y);
-      ctx.lineTo(mirrorX + width, y);
-      ctx.lineTo(mirrorX + width, y + cLen);
+      ctx.moveTo(displayX + width - cLen, y);
+      ctx.lineTo(displayX + width, y);
+      ctx.lineTo(displayX + width, y + cLen);
       // Bottom-Left
-      ctx.moveTo(mirrorX, y + height - cLen);
-      ctx.lineTo(mirrorX, y + height);
-      ctx.lineTo(mirrorX + cLen, y + height);
+      ctx.moveTo(displayX, y + height - cLen);
+      ctx.lineTo(displayX, y + height);
+      ctx.lineTo(displayX + cLen, y + height);
       // Bottom-Right
-      ctx.moveTo(mirrorX + width - cLen, y + height);
-      ctx.lineTo(mirrorX + width, y + height);
-      ctx.lineTo(mirrorX + width, y + height - cLen);
+      ctx.moveTo(displayX + width - cLen, y + height);
+      ctx.lineTo(displayX + width, y + height);
+      ctx.lineTo(displayX + width, y + height - cLen);
       ctx.stroke();
 
-      // Label background & text
+      // Label background & text (drawn in unmirrored canvas space so text remains readable)
       const simText = frameData.similarity !== null ? ` ${(frameData.similarity * 100).toFixed(0)}%` : '';
       const label = `${statusText}${simText}`;
       ctx.font = 'bold 13px Inter, sans-serif';
       const textWidth = ctx.measureText(label).width;
 
       ctx.fillStyle = strokeColor;
-      ctx.fillRect(mirrorX, Math.max(0, y - 26), textWidth + 16, 26);
+      ctx.fillRect(displayX, Math.max(0, y - 26), textWidth + 16, 26);
 
       ctx.fillStyle = '#FFFFFF';
-      ctx.fillText(label, mirrorX + 8, Math.max(16, y - 8));
+      ctx.fillText(label, displayX + 8, Math.max(16, y - 8));
     }
   };
 
@@ -277,26 +328,16 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
       onStopVerification(summary);
     } catch (err) {
       console.error('Stop error:', err);
-      // Fallback local summary if backend call fails
-      onStopVerification({
-        session_id: sessionId,
-        status: 'completed',
-        duration_seconds: 15.0,
-        total_frames: stats.total,
-        matched_frames: stats.matched,
-        unmatched_frames: stats.unmatched,
-        no_face_frames: stats.noFace,
-        multiple_faces_frames: 0,
-        match_percentage: stats.total > 0 ? (stats.matched / stats.total) * 100 : 0,
-        looking_away_percentage: stats.total > 0 ? (stats.lookingAway / stats.total) * 100 : 0,
-        overall_verdict: stats.matched > stats.unmatched ? 'PASSED' : 'SUSPICIOUS',
-        events: events.map((e) => ({ id: e.id, timestamp: Date.now() / 1000, type: e.title, details: { message: e.detail } })),
-      });
+      setError(`Could not finish the session: ${err.message}. No result was produced.`);
+      setIsStopping(false);
     }
   };
 
-  const matchRate = stats.total > 0 ? Math.round((stats.matched / stats.total) * 100) : 100;
-  const gazeAttentionRate = stats.total > 0 ? Math.round(((stats.total - stats.lookingAway) / stats.total) * 100) : 100;
+  const matchRate = stats.total > 0 ? Math.round((stats.matched / stats.total) * 100) : null;
+  const isCalibratingGaze = latestFrame?.calibrating || latestFrame?.gaze_direction === 'CALIBRATING';
+  const gazeAttentionRate = (!isCalibratingGaze && stats.total > 0)
+    ? Math.round(((stats.total - stats.lookingAway) / stats.total) * 100)
+    : null;
 
   return (
     <div className="live-verification-container">
@@ -328,10 +369,15 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
 
       {error && (
         <div className="live-error-banner">
-          ⚠️ <strong>Error:</strong> {error}
-          <button className="btn-small-link" onClick={onBackToCapture}>
-            Return to Reference Capture
-          </button>
+          <span>⚠️ <strong>Error:</strong> {error}</span>
+          <div style={{ display: 'inline-flex', gap: '8px', marginLeft: '12px' }}>
+            <button className="btn-small-link" onClick={handleStop} disabled={isStopping}>
+              {isStopping ? 'Retrying...' : 'Retry'}
+            </button>
+            <button className="btn-small-link" onClick={onBackToCapture}>
+              Return to Reference Capture
+            </button>
+          </div>
         </div>
       )}
 
@@ -349,6 +395,36 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
             />
             {/* Overlay Canvas for Bounding Box & Landmarks */}
             <canvas ref={overlayCanvasRef} className="overlay-canvas" />
+
+            {/* Connection Warning Banner (M5) */}
+            {connectionWarning && (
+              <div className="connection-lost-banner" role="alert">
+                <span className="warning-icon">⚠️</span>
+                <span>{connectionWarning}</span>
+              </div>
+            )}
+
+            {/* Calibration Banner (M4) */}
+            {latestFrame && (latestFrame.calibrating || latestFrame.gaze_direction === 'CALIBRATING') && (
+              <div className="calibration-banner">
+                <span className="pulse-dot"></span>
+                <span>Calibrating baseline gaze... Please look at screen normally</span>
+              </div>
+            )}
+
+            {/* Fatal Session Error Modal (M5) */}
+            {fatalSessionError && (
+              <div className="fatal-error-overlay">
+                <div className="fatal-error-card">
+                  <div className="fatal-error-icon">🛑</div>
+                  <h3>Session Terminated</h3>
+                  <p>{fatalSessionError}</p>
+                  <button className="btn-primary" onClick={onBackToCapture}>
+                    Return to Reference Capture
+                  </button>
+                </div>
+              </div>
+            )}
 
             {/* Live Status Overlay Ribbon */}
             <div className="hud-overlay-top">
@@ -382,9 +458,19 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
               )}
 
               {latestFrame && (
-                <div className={`gaze-tag ${latestFrame.is_looking_away ? 'away' : 'center'}`}>
+                <div
+                  className={`gaze-tag ${
+                    latestFrame.is_looking_away === true
+                      ? 'away'
+                      : latestFrame.is_looking_away === false
+                      ? 'center'
+                      : 'unknown'
+                  }`}
+                >
                   <span className="gaze-icon">
-                    {latestFrame.gaze_direction === 'CENTER'
+                    {latestFrame.calibrating || latestFrame.gaze_direction === 'CALIBRATING'
+                      ? '🎯'
+                      : latestFrame.gaze_direction === 'CENTER'
                       ? '🎯'
                       : latestFrame.gaze_direction === 'LOOKING_LEFT'
                       ? '⬅️'
@@ -392,9 +478,17 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
                       ? '➡️'
                       : latestFrame.gaze_direction === 'LOOKING_UP'
                       ? '⬆️'
-                      : '⬇️'}
+                      : latestFrame.gaze_direction === 'LOOKING_DOWN'
+                      ? '⬇️'
+                      : '👁️'}
                   </span>
-                  <span>{latestFrame.gaze_direction.replace('_', ' ')}</span>
+                  <span>
+                    {latestFrame.calibrating || latestFrame.gaze_direction === 'CALIBRATING'
+                      ? 'CALIBRATING'
+                      : latestFrame.gaze_direction
+                      ? latestFrame.gaze_direction.replace('_', ' ')
+                      : 'UNKNOWN'}
+                  </span>
                 </div>
               )}
             </div>
@@ -441,11 +535,11 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
                 </div>
                 <div className="detail-item">
                   <span className="detail-label">Algorithm</span>
-                  <span className="detail-value">SFace embedding (OpenCV)</span>
+                  <span className="detail-value">Face match (SFace)</span>
                 </div>
                 <div className="detail-item">
-                  <span className="detail-label">Gaze Sensor</span>
-                  <span className="detail-value">Iris & SolvePnP 6DoF</span>
+                  <span className="detail-label">Gaze Tracking</span>
+                  <span className="detail-value">Head pose + iris position</span>
                 </div>
               </div>
             </div>
@@ -458,12 +552,12 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
               <div className="gauge-item">
                 <div className="gauge-header">
                   <span>Match Consistency</span>
-                  <span className="gauge-val">{matchRate}%</span>
+                  <span className="gauge-val">{matchRate !== null ? `${matchRate}%` : '—'}</span>
                 </div>
                 <div className="gauge-track">
                   <div
-                    className={`gauge-fill ${matchRate >= 80 ? 'good' : 'warning'}`}
-                    style={{ width: `${matchRate}%` }}
+                    className={`gauge-fill ${matchRate !== null && matchRate >= 80 ? 'good' : 'warning'}`}
+                    style={{ width: `${matchRate ?? 0}%` }}
                   ></div>
                 </div>
               </div>
@@ -471,12 +565,14 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
               <div className="gauge-item">
                 <div className="gauge-header">
                   <span>Gaze Attention (Center)</span>
-                  <span className="gauge-val">{gazeAttentionRate}%</span>
+                  <span className="gauge-val">
+                    {isCalibratingGaze ? 'Calibrating...' : gazeAttentionRate !== null ? `${gazeAttentionRate}%` : '—'}
+                  </span>
                 </div>
                 <div className="gauge-track">
                   <div
-                    className={`gauge-fill ${gazeAttentionRate >= 70 ? 'good' : 'warning'}`}
-                    style={{ width: `${gazeAttentionRate}%` }}
+                    className={`gauge-fill ${gazeAttentionRate !== null && gazeAttentionRate >= 70 ? 'good' : 'warning'}`}
+                    style={{ width: `${gazeAttentionRate ?? 0}%` }}
                   ></div>
                 </div>
               </div>

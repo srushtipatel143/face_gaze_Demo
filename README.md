@@ -7,7 +7,7 @@ A real-time AI-powered biometric verification web application combining face mat
 ## 📋 Prerequisites
 
 Before running the project, ensure you have:
-- **Python** (Recommended: Python 3.9 - 3.11 for MediaPipe compatibility)
+- **Python 3.9 – 3.11** (Required: `mediapipe==0.10.14` requires Python 3.9–3.11 for prebuilt wheels and stable `mp.solutions` API support)
 - **Node.js** (v18.x or later) & **npm**
 - A working **Webcam**
 
@@ -93,10 +93,13 @@ face_gaze_demo/
 ├── .gitignore               # Git ignore rules for frontend and backend
 ├── README.md                # Project documentation & run guide
 ├── backend/
-│   ├── database.py          # In-memory thread-safe session database
+│   ├── database.py          # In-memory thread-safe session database & state tracking
+│   ├── evaluator.py         # Pure functional evaluation, interval tracker & independent verdicts (L10)
 │   ├── main.py              # FastAPI endpoints & CORS configuration
-│   ├── vision_engine.py     # MediaPipe Face Mesh & iris gaze estimation
-│   ├── requirements.txt     # Python dependencies
+│   ├── vision_engine.py     # YuNet face detector, SFace recognizer & MediaPipe Face Mesh
+│   ├── requirements.txt     # Python dependencies (including pytest)
+│   ├── tests/
+│   │   └── test_rules.py    # Offline pytest test suite for intervals, baseline & verdicts (L10)
 │   └── models/
 │       └── schemas.py       # Pydantic data schemas
 └── frontend/
@@ -107,5 +110,51 @@ face_gaze_demo/
         ├── App.jsx          # Main application & step management
         ├── CameraCapture.jsx# Reference photo capture component
         ├── LiveVerification.jsx # Live camera feed, face box & gaze tracking
-        └── SessionResults.jsx # Verification summary & metrics
+        ├── SessionResults.jsx # Verification summary, intervals & metrics
+        └── config.js        # Centralized API base URL (L2)
 ```
+
+---
+
+## 🧪 Running Automated Tests
+
+A comprehensive, offline unit test suite is included to test rule evaluation, interval tracking, and verdict decisions without requiring camera hardware:
+
+```bash
+cd backend
+.\.venv\Scripts\pytest tests/test_rules.py -v
+```
+
+All tests execute in milliseconds using in-memory synthetic record batches.
+
+---
+
+## 🔍 About this Demo: Models & Limitations (L8)
+
+| Component | Model / Engine | Purpose | Operational Limitations |
+| :--- | :--- | :--- | :--- |
+| **Face Detection** | OpenCV YuNet (`face_detection_yunet_2023mar.onnx`) | Real-time face bounding box & 5-point facial landmarks | Requires well-lit frontal face; extreme profile angles (>60°) or heavy occlusion may drop detection. |
+| **Face Recognition** | OpenCV SFace (`face_recognition_sface_2021dec.onnx`) | 128-D cosine similarity embedding matching | Matches 2D appearance against reference snapshot. Threshold tuned to 0.363 for high-confidence match. |
+| **Gaze & Head Pose** | MediaPipe Face Mesh (478 3D landmarks) + SolvePnP | Iris horizontal/vertical displacement + 3D head yaw/pitch | Baseline-calibrated to each user's camera mounting position (M4). Rapid head jerks or extreme eye squinting may register as unknown gaze. |
+| **Liveness / Anti-Spoofing** | Heuristic (Blink & Pose variance monitoring) | Warns on static photo printouts held still for 30+ seconds | Baseline behavioral safeguard only; does not replace dedicated passive 3D anti-spoofing models (M8). |
+
+---
+
+## ⚠️ Known Limitations & Anti-Spoofing (Liveness)
+
+### Current Demo Scope
+This application is designed as a demonstration of 2D facial recognition and eye-gaze tracking using standard webcams. **It does not incorporate full 3D passive anti-spoofing or active challenge-response liveness models.**
+- A high-resolution printed photograph or phone screen displaying the enrolled user can pass facial matching.
+- An informative disclaimer is displayed on the audit results screen: *"Anti-Spoofing / Liveness Note: No 3D passive anti-spoofing or active challenge-response check is enforced in this demo."*
+
+### Heuristic Static Face Detection (Included)
+To provide a baseline safeguard against static printouts and frozen video feeds, the backend incorporates a lightweight behavioral check:
+- **Blink Monitoring**: Tracks natural eye-blinking via normalized eyelid openness ratios (`openness < 0.18`).
+- **Pose Micro-Movements**: Tracks standard deviation of head yaw and pitch over trailing 30-second windows.
+- If a face maintains biometric matching continuously for **30+ seconds with 0 blinks and near-zero head movement** (`std < 0.35°`), the engine emits a `STATIC_FACE_WARNING` audit event and flags the face assessment as `REVIEW` (`static_face_detected`).
+
+### Recommended Production Architecture (Future Work)
+For enterprise or proctoring environments requiring tamper-proof anti-spoofing:
+1. **Passive Single-Frame Liveness**: Integrate a neural network (such as MiniFASNet, Silent-Face-Anti-Spoofing, or CDCN) trained on physical texture, screen moiré artifacts, and planar reflection cues.
+2. **Active Challenge-Response Verification**: Issue randomized on-screen instructions during verification (e.g., "Blink twice", "Turn head 20° to the left", or "Track the moving on-screen target with your eyes").
+3. **Hardware-Assisted Depth**: Utilize RGB-D depth sensors (Intel RealSense, Apple FaceID TrueDepth, or IR cameras) to reject planar representations.
