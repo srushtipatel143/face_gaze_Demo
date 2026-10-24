@@ -1,15 +1,36 @@
 """
 Vision Engine for Face Verification and Eye-Gaze Estimation.
-Powered by MediaPipe Face Mesh and OpenCV.
+Powered by OpenCV YuNet, OpenCV SFace, and MediaPipe Face Mesh.
 """
 
 import base64
 import io
 import re
+from pathlib import Path
+from threading import Lock
+import urllib.request
+from typing import Tuple, Optional, Dict, Any, List
 import numpy as np
 import cv2
 import mediapipe as mp
-from typing import Tuple, Optional, Dict, Any, List
+
+WEIGHTS = Path(__file__).parent / "weights"
+SFACE_MATCH_THRESHOLD = 0.363  # Cosine similarity threshold for OpenCV SFace
+
+def ensure_weights():
+    """Ensure ONNX model weights exist locally in backend/weights/."""
+    WEIGHTS.mkdir(parents=True, exist_ok=True)
+    models = {
+        "face_detection_yunet_2023mar.onnx": "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
+        "face_recognition_sface_2021dec.onnx": "https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx"
+    }
+    for filename, url in models.items():
+        dest = WEIGHTS / filename
+        if not dest.exists() or dest.stat().st_size < 1000:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req) as resp, open(dest, "wb") as f:
+                while chunk := resp.read(1024 * 1024):
+                    f.write(chunk)
 
 # Landmark indices for canonical facial feature points
 # Selected 68 anchor landmarks across eyes, brows, nose, mouth contour, and jaw
@@ -41,6 +62,8 @@ MODEL_POINTS_3D = np.array([
 
 class VisionEngine:
     def __init__(self):
+        ensure_weights()
+        self._lock = Lock()
         self.mp_face_mesh = mp.solutions.face_mesh
         # FaceMesh with iris refinement enabled (provides landmarks 468-477 for iris)
         self.face_mesh = self.mp_face_mesh.FaceMesh(
@@ -56,6 +79,17 @@ class VisionEngine:
             max_num_faces=4,
             refine_landmarks=True,
             min_detection_confidence=0.6
+        )
+        # OpenCV YuNet Face Detector
+        yunet_file = str(WEIGHTS / "face_detection_yunet_2023mar.onnx")
+        self.detector = cv2.FaceDetectorYN.create(
+            yunet_file, "", (320, 320),
+            score_threshold=0.8,
+        )
+        # OpenCV SFace Face Recognizer
+        sface_file = str(WEIGHTS / "face_recognition_sface_2021dec.onnx")
+        self.recognizer = cv2.FaceRecognizerSF.create(
+            sface_file, ""
         )
 
     @staticmethod
@@ -143,45 +177,26 @@ class VisionEngine:
 
         return {"x": x, "y": y, "width": width, "height": height}
 
-    @staticmethod
-    def compute_embedding(landmarks) -> np.ndarray:
-        """
-        Construct a normalized 3D facial feature embedding vector from 468 face landmarks.
-        Uses scale-normalized and center-aligned canonical anchor landmarks to yield
-        an invariant biometric descriptor.
-        """
-        pts = np.array([[p.x, p.y, p.z] for p in landmarks.landmark], dtype=np.float64)
+    def detect_faces(self, image: np.ndarray) -> np.ndarray:
+        """Detect faces in image using OpenCV YuNet. Returns array of shape (N, 15)."""
+        h, w = image.shape[:2]
+        with self._lock:
+            self.detector.setInputSize((w, h))
+            _, faces = self.detector.detect(image)
+        return faces if faces is not None else np.empty((0, 15), dtype=np.float32)
 
-        # Reference anchor points
-        nose = pts[1]
-        left_eye = pts[33]
-        right_eye = pts[263]
+    def compute_embedding(self, image: np.ndarray, face_row: np.ndarray) -> np.ndarray:
+        """Align and crop face using 5 landmarks from YuNet, then compute 128-d SFace feature embedding."""
+        with self._lock:
+            aligned = self.recognizer.alignCrop(image, face_row)
+            return self.recognizer.feature(aligned)  # shape (1, 128)
 
-        # Inter-ocular distance for scale invariance
-        iod = np.linalg.norm(right_eye - left_eye) + 1e-6
-
-        # Center on nose and scale
-        norm_pts = (pts - nose) / iod
-
-        # Select anchor subset
-        anchors = norm_pts[ANCHOR_LANDMARKS].flatten()
-
-        # Additional relative inter-landmark distances for structural rigidity
-        pairs = [
-            (33, 263), (1, 152), (61, 291), (10, 152), (33, 1), (263, 1),
-            (70, 300), (105, 334), (61, 1), (291, 1), (133, 362), (234, 454)
-        ]
-        pair_dists = [np.linalg.norm(norm_pts[i] - norm_pts[j]) for i, j in pairs]
-
-        feature_vector = np.concatenate([anchors, pair_dists])
-        unit_vector = feature_vector / (np.linalg.norm(feature_vector) + 1e-6)
-        return unit_vector
-
-    @staticmethod
-    def compute_similarity(embedding_a: np.ndarray, embedding_b: np.ndarray) -> float:
-        """Calculate cosine similarity between two unit biometric embeddings (range 0.0 - 1.0)."""
-        dot = float(np.dot(embedding_a, embedding_b))
-        return max(0.0, min(1.0, dot))
+    def compute_similarity(self, a: np.ndarray, b: np.ndarray) -> float:
+        """Calculate cosine similarity between two SFace embeddings."""
+        a_arr = np.asarray(a, dtype=np.float32)
+        b_arr = np.asarray(b, dtype=np.float32)
+        with self._lock:
+            return float(self.recognizer.match(a_arr, b_arr, cv2.FaceRecognizerSF_FR_COSINE))
 
     @staticmethod
     def estimate_head_pose(landmarks, img_w: int, img_h: int) -> Tuple[float, float, float]:
@@ -309,22 +324,21 @@ class VisionEngine:
     def process_reference_image(self, image: np.ndarray) -> Dict[str, Any]:
         """
         Analyze reference photo for Phase 2:
-        - Detect faces (reject if != 1)
+        - Detect faces with YuNet (reject if != 1)
         - Validate quality
-        - Generate reference embedding
+        - Generate reference SFace embedding
         """
         h, w = image.shape[:2]
-        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        results = self.reference_face_mesh.process(rgb)
+        faces = self.detect_faces(image)
 
-        if not results.multi_face_landmarks:
+        if len(faces) == 0:
             return {
                 "success": False,
                 "faces_detected": 0,
                 "message": "No face detected. Please ensure your face is well-lit and directly facing the webcam."
             }
 
-        face_count = len(results.multi_face_landmarks)
+        face_count = len(faces)
         if face_count > 1:
             return {
                 "success": False,
@@ -332,8 +346,13 @@ class VisionEngine:
                 "message": f"Multiple faces detected ({face_count}). Only one person should be present in the photo."
             }
 
-        landmarks = results.multi_face_landmarks[0]
-        face_box = self.extract_face_box(landmarks, w, h)
+        face_row = faces[0]
+        face_box = {
+            "x": max(0, int(face_row[0])),
+            "y": max(0, int(face_row[1])),
+            "width": int(face_row[2]),
+            "height": int(face_row[3])
+        }
         quality_score, issues = self.assess_quality(image, face_box)
 
         if quality_score < 30.0 and len(issues) > 0:
@@ -344,7 +363,7 @@ class VisionEngine:
                 "message": f"Photo quality insufficient: {'; '.join(issues)}"
             }
 
-        embedding = self.compute_embedding(landmarks)
+        embedding = self.compute_embedding(image, face_row)
 
         return {
             "success": True,
@@ -364,15 +383,15 @@ class VisionEngine:
     def process_live_frame(self, image: np.ndarray, reference_embedding: np.ndarray) -> Dict[str, Any]:
         """
         Analyze real-time frame for Phase 3 & Phase 4:
-        - Count faces
-        - Compute live face embedding & match similarity
-        - Compute gaze direction & head pose
+        - Count faces using YuNet
+        - Compute live face embedding & match similarity using SFace
+        - Compute gaze direction & head pose using MediaPipe Face Mesh
         """
         h, w = image.shape[:2]
-        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        results = self.face_mesh.process(rgb)
+        faces = self.detect_faces(image)
+        face_count = len(faces)
 
-        if not results.multi_face_landmarks:
+        if face_count == 0:
             return {
                 "faces_detected": 0,
                 "verification_status": "NO_FACE",
@@ -385,9 +404,14 @@ class VisionEngine:
                 "face_box": None
             }
 
-        face_count = len(results.multi_face_landmarks)
         if face_count > 1:
-            first_box = self.extract_face_box(results.multi_face_landmarks[0], w, h)
+            first_face = faces[0]
+            first_box = {
+                "x": max(0, int(first_face[0])),
+                "y": max(0, int(first_face[1])),
+                "width": int(first_face[2]),
+                "height": int(first_face[3])
+            }
             return {
                 "faces_detected": face_count,
                 "verification_status": "MULTIPLE_FACES",
@@ -400,22 +424,56 @@ class VisionEngine:
                 "face_box": first_box
             }
 
-        # Exactly 1 face detected
-        landmarks = results.multi_face_landmarks[0]
-        face_box = self.extract_face_box(landmarks, w, h)
-        live_embedding = self.compute_embedding(landmarks)
+        # Exactly 1 face detected by YuNet
+        face_row = faces[0]
+        face_box = {
+            "x": max(0, int(face_row[0])),
+            "y": max(0, int(face_row[1])),
+            "width": int(face_row[2]),
+            "height": int(face_row[3])
+        }
+
+        # Compute SFace embedding and cosine similarity
+        live_embedding = self.compute_embedding(image, face_row)
         similarity = self.compute_similarity(reference_embedding, live_embedding)
 
-        # Verification threshold: similarity >= 0.82 indicates same face identity
-        is_match = similarity >= 0.82
-        verification_status = "MATCH" if is_match else "NO_MATCH"
+        # Head pose & eye-gaze tracking via MediaPipe Face Mesh
+        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        with self._lock:
+            mesh_results = self.face_mesh.process(rgb)
 
-        gaze_res = self.analyze_gaze(landmarks, w, h)
+        if mesh_results.multi_face_landmarks:
+            landmarks = mesh_results.multi_face_landmarks[0]
+            gaze_res = self.analyze_gaze(landmarks, w, h)
+        else:
+            gaze_res = {
+                "gaze_direction": "CENTER",
+                "is_looking_away": False,
+                "yaw": 0.0,
+                "pitch": 0.0,
+                "roll": 0.0,
+                "iris_h": 0.5,
+                "iris_v": 0.5
+            }
+
+        yaw = gaze_res.get("yaw", 0.0)
+        pitch = gaze_res.get("pitch", 0.0)
+
+        # Verification threshold: similarity >= 0.363 indicates same face identity
+        # Extreme head angles (>35° yaw or pitch) degrade facial recognition accuracy;
+        # mark as UNKNOWN rather than NO_MATCH to prevent false alarms.
+        is_match = similarity >= SFACE_MATCH_THRESHOLD
+        if is_match:
+            verification_status = "MATCH"
+        elif (yaw is not None and abs(yaw) > 35.0) or (pitch is not None and abs(pitch) > 35.0):
+            verification_status = "UNKNOWN"
+        else:
+            verification_status = "NO_MATCH"
 
         return {
             "faces_detected": 1,
             "verification_status": verification_status,
-            "similarity": round(similarity, 4),
+            "similarity": round(float(similarity), 4),
             "is_match": is_match,
             "gaze_direction": gaze_res["gaze_direction"],
             "is_looking_away": gaze_res["is_looking_away"],

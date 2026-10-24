@@ -106,7 +106,11 @@ class SessionDatabase:
                     self._internal_add_event(sess, "IDENTITY_MISMATCH", {
                         "message": f"Face does not match reference identity (similarity: {result.get('similarity')})."
                     })
-                elif status == "MATCH" and last_status in ["NO_FACE", "MULTIPLE_FACES", "NO_MATCH"]:
+                elif status == "UNKNOWN":
+                    self._internal_add_event(sess, "IDENTITY_UNCERTAIN", {
+                        "message": "Head angle turned far from camera (>35°); identity verification uncertain."
+                    })
+                elif status == "MATCH" and last_status in ["NO_FACE", "MULTIPLE_FACES", "NO_MATCH", "UNKNOWN"]:
                     self._internal_add_event(sess, "FACE_RESTORED", {
                         "message": "Verified user face re-established in camera view."
                     })
