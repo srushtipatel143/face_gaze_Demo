@@ -32,7 +32,7 @@ class BoundingBox(BaseModel):
 class FrameVerificationResponse(BaseModel):
     session_id: str
     faces_detected: int
-    verification_status: str  # "MATCH", "NO_MATCH", "NO_FACE", "MULTIPLE_FACES"
+    verification_status: str  # "MATCH", "NO_MATCH", "NO_FACE", "MULTIPLE_FACES", "UNKNOWN"
     similarity: Optional[float] = None
     is_match: bool
     gaze_direction: str  # "CENTER", "LOOKING_LEFT", "LOOKING_RIGHT", "LOOKING_UP", "LOOKING_DOWN", "UNKNOWN"

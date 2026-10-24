@@ -98,6 +98,8 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
         addLocalEvent('🚨 Multiple Faces', `${data.faces_detected} faces detected in frame`, 'danger');
       } else if (data.verification_status === 'NO_MATCH') {
         addLocalEvent('❌ Identity Mismatch', `Similarity: ${(data.similarity * 100).toFixed(1)}%`, 'danger');
+      } else if (data.verification_status === 'UNKNOWN') {
+        addLocalEvent('⚠️ Angle Too Steep', 'Face turned far from camera (>35° yaw/pitch)', 'warning');
       } else if (data.is_looking_away) {
         addLocalEvent('👀 Looking Away', `Direction: ${data.gaze_direction.replace('_', ' ')}`, 'warning');
       }
@@ -145,6 +147,9 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
       if (frameData.verification_status === 'NO_MATCH') {
         strokeColor = '#EF4444';
         statusText = 'NO MATCH';
+      } else if (frameData.verification_status === 'UNKNOWN') {
+        strokeColor = '#F59E0B';
+        statusText = 'HEAD TURNED • UNCERTAIN';
       } else if (frameData.verification_status === 'MULTIPLE_FACES') {
         strokeColor = '#DC2626';
         statusText = 'MULTIPLE FACES';
@@ -354,6 +359,8 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
                       ? '✓'
                       : latestFrame.verification_status === 'NO_MATCH'
                       ? '✕'
+                      : latestFrame.verification_status === 'UNKNOWN'
+                      ? '❓'
                       : '⚠️'}
                   </span>
                   <span className="tag-text">
@@ -361,6 +368,8 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
                       ? 'IDENTITY MATCH'
                       : latestFrame.verification_status === 'NO_MATCH'
                       ? 'IDENTITY MISMATCH'
+                      : latestFrame.verification_status === 'UNKNOWN'
+                      ? 'IDENTITY UNCERTAIN (HEAD TURNED)'
                       : latestFrame.verification_status === 'NO_FACE'
                       ? 'NO FACE DETECTED'
                       : 'MULTIPLE FACES DETECTED'}
@@ -432,7 +441,7 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
                 </div>
                 <div className="detail-item">
                   <span className="detail-label">Algorithm</span>
-                  <span className="detail-value">3D Mesh Biometrics</span>
+                  <span className="detail-value">SFace embedding (OpenCV)</span>
                 </div>
                 <div className="detail-item">
                   <span className="detail-label">Gaze Sensor</span>
