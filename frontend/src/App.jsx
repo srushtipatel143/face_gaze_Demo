@@ -2,15 +2,8 @@ import React, { useState, useEffect } from 'react';
 import CameraCapture from './CameraCapture';
 import LiveVerification from './LiveVerification';
 import SessionResults from './SessionResults';
+import { API_BASE } from './config';
 import './App.css';
-
-const PHASES = [
-  { id: 1, title: 'Phase 1: Reference Photo', subtitle: 'Webcam capture, preview & confirm' },
-  { id: 2, title: 'Phase 2: Face Validation', subtitle: 'Single-face validation & session' },
-  { id: 3, title: 'Phase 3: Live Verification', subtitle: 'Real-time face matching stream' },
-  { id: 4, title: 'Phase 4: Gaze Detection', subtitle: 'Iris tracking & looking-away flags' },
-  { id: 5, title: 'Phase 5: Session Dashboard', subtitle: 'Timestamped events & final metrics' },
-];
 
 export default function App() {
   // Navigation / Phase state: 'capture' | 'live' | 'results'
@@ -27,7 +20,7 @@ export default function App() {
     let isMounted = true;
     const checkBackend = async () => {
       try {
-        const res = await fetch('http://localhost:8000/health');
+        const res = await fetch(`${API_BASE}/health`);
         if (res.ok) {
           if (isMounted) setBackendStatus('online');
         } else {
@@ -74,20 +67,14 @@ export default function App() {
     setAppStage('capture');
   };
 
-  // Return to reference capture
+  // Return to reference capture (M6)
   const handleBackToCapture = () => {
+    setConfirmedPhoto(null);
+    setSessionId(null);
+    setValidationInfo(null);
+    setSessionSummary(null);
     setAppStage('capture');
   };
-
-  // Calculate current active phase index for the header roadmap
-  const getCurrentPhaseIndex = () => {
-    if (appStage === 'results') return 5;
-    if (appStage === 'live') return 3; // Phases 3 & 4 active concurrently
-    if (confirmedPhoto && sessionId) return 2;
-    return 1;
-  };
-
-  const activePhase = getCurrentPhaseIndex();
 
   return (
     <div className="app-layout">
@@ -102,17 +89,17 @@ export default function App() {
         </div>
 
         <div className="nav-actions">
-          {/* Active Phase Badge */}
+          {/* Current Stage Indicator */}
           <div className="phase-pill">
             <span className="phase-pill-step">STAGE:</span>
             <span className="phase-pill-name">
               {appStage === 'capture' && !sessionId
-                ? 'Phase 1 • Reference Photo'
+                ? 'Reference Photo'
                 : appStage === 'capture' && sessionId
-                ? 'Phase 2 • Face Validated'
+                ? 'Reference Accepted'
                 : appStage === 'live'
-                ? 'Phases 3 & 4 • Live Analysis'
-                : 'Phase 5 • Audit Report'}
+                ? 'Live Verification'
+                : 'Session Report'}
             </span>
           </div>
 
@@ -125,7 +112,7 @@ export default function App() {
           </div>
 
           <a
-            href="http://localhost:8000/docs"
+            href={`${API_BASE}/docs`}
             target="_blank"
             rel="noreferrer"
             className="nav-link-docs"
@@ -134,44 +121,6 @@ export default function App() {
           </a>
         </div>
       </header>
-
-      {/* 5-Phase Roadmap Bar */}
-      <section className="roadmap-bar">
-        <div className="roadmap-header">
-          <span className="tracker-badge">Implementation Roadmap</span>
-          <span className="tracker-counter">
-            {activePhase === 5
-              ? 'Phase 5 Complete (5/5)'
-              : activePhase === 3
-              ? 'Live Verification In Progress (Phases 3 & 4)'
-              : activePhase === 2
-              ? 'Phase 2 Complete • Ready for Live Stream (2/5)'
-              : 'Phase 1 In Progress (0/5)'}
-          </span>
-        </div>
-        <div className="phases-list">
-          {PHASES.map((phase) => {
-            let status = 'upcoming';
-            if (activePhase > phase.id || (activePhase === 5 && phase.id <= 5)) {
-              status = 'completed';
-            } else if (activePhase === phase.id || (activePhase === 3 && (phase.id === 3 || phase.id === 4))) {
-              status = 'current';
-            }
-
-            return (
-              <div key={phase.id} className={`phase-step ${status}`}>
-                <div className="step-circle">
-                  {status === 'completed' ? '✓' : phase.id}
-                </div>
-                <div className="step-content">
-                  <div className="step-title">{phase.title}</div>
-                  <div className="step-subtitle">{phase.subtitle}</div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </section>
 
       {/* Main Workspace Router */}
       <main className="main-content">
@@ -194,7 +143,7 @@ export default function App() {
                 <div className="reference-summary">
                   <div className="confirmed-thumb-wrapper">
                     <img src={confirmedPhoto} alt="Confirmed Face Reference" className="confirmed-thumb" />
-                    <span className="confirmed-badge">Validated for Phases 3 & 4</span>
+                    <span className="confirmed-badge">Reference Photo Accepted</span>
                   </div>
 
                   <div className="info-list">
@@ -205,30 +154,30 @@ export default function App() {
                     <div className="info-row">
                       <span className="info-label">Quality Score</span>
                       <span className="info-value text-success">
-                        {validationInfo?.quality_score ? `${validationInfo.quality_score}%` : 'High'}
+                        {validationInfo?.quality_score ? `${validationInfo.quality_score}%` : 'Accepted'}
                       </span>
                     </div>
                     <div className="info-row">
                       <span className="info-label">Faces Detected</span>
-                      <span className="info-value">1 (Single Person Confirmed)</span>
+                      <span className="info-value">1 (Single Face Detected)</span>
                     </div>
                     <div className="info-row">
-                      <span className="info-label">Biometric Embedding</span>
-                      <span className="info-value text-emerald">Generated & Cached</span>
+                      <span className="info-label">Face Embedding</span>
+                      <span className="info-value text-emerald">SFace Generated</span>
                     </div>
                   </div>
 
                   <div className="next-phase-action-box">
-                    <h4>Phase 2 Succeeded</h4>
+                    <h4>Ready for Live Verification</h4>
                     <p>
-                      Your biometric reference embedding is generated and stored in temporary backend session memory.
+                      Reference photo accepted and biometric embedding generated. You can now begin live verification.
                     </p>
                     <button
                       className="btn btn-primary btn-large btn-launch"
                       onClick={handleStartLiveVerification}
                       id="btn-start-live-verification"
                     >
-                      🚀 Start Live Verification (Phases 3 & 4)
+                      🚀 Start Live Verification
                     </button>
                   </div>
                 </div>
@@ -250,7 +199,7 @@ export default function App() {
           </div>
         )}
 
-        {/* STAGE 3 & 4: Real-time Live Face Verification & Eye-Gaze Tracking */}
+        {/* Real-time Live Face Verification & Eye-Gaze Tracking */}
         {appStage === 'live' && (
           <LiveVerification
             sessionId={sessionId}
@@ -260,7 +209,7 @@ export default function App() {
           />
         )}
 
-        {/* STAGE 5: Final Demo Results & Compliance Audit Dashboard */}
+        {/* Final Demo Results & Compliance Audit Dashboard */}
         {appStage === 'results' && (
           <SessionResults
             summary={sessionSummary}
@@ -272,7 +221,7 @@ export default function App() {
 
       {/* Global Footer */}
       <footer className="app-footer">
-        <p>Face Verification & Eye-Gaze Detection System • Complete 5-Phase End-to-End Pipeline</p>
+        <p>Face Verification & Eye-Gaze Tracking Demo • OpenCV (YuNet + SFace) & MediaPipe Face Mesh</p>
       </footer>
     </div>
   );
