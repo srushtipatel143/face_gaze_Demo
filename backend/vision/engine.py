@@ -332,7 +332,7 @@ class VisionEngine:
             success = all(c["passed"] is True for c in checks)
             issues = [c["detail"] for c in checks if c["passed"] is False and c["detail"]]
 
-            embedding = self.face.embed(image, main) if success else None
+            embedding = self.face.embed(image, main) if (main is not None) else None
 
             return {
                 "success": success,

@@ -31,15 +31,15 @@ SESSION_REFERENCE_FRAMES = _i("SESSION_REFERENCE_FRAMES", 5)
 SESSION_REFERENCE_MIN_SIMILARITY = _f("SESSION_REFERENCE_MIN_SIMILARITY", 0.5)
 
 # ---- Reference photo checks ---------------------------------------------------
-REF_MIN_SHARPNESS = _f("REF_MIN_SHARPNESS", 40.0)       # current
-REF_MIN_BRIGHTNESS = _f("REF_MIN_BRIGHTNESS", 45.0)     # current
+REF_MIN_SHARPNESS = _f("REF_MIN_SHARPNESS", 30.0)       # current
+REF_MIN_BRIGHTNESS = _f("REF_MIN_BRIGHTNESS", 35.0)     # current
 REF_MAX_BRIGHTNESS = _f("REF_MAX_BRIGHTNESS", 220.0)    # current
 REF_MIN_FACE_RATIO = _f("REF_MIN_FACE_RATIO", 0.05)     # current
 REF_MIN_FACE_PX = _i("REF_MIN_FACE_PX", 80)             # current
-REF_MAX_POSE_DEG = _f("REF_MAX_POSE_DEG", 22.0)         # current
+REF_MAX_POSE_DEG = _f("REF_MAX_POSE_DEG", 25.0)         # current
 
 # ---- Eyes and gaze ------------------------------------------------------------
-EYES_OPEN_MIN = _f("EYES_OPEN_MIN", 0.18)               # current
+EYES_OPEN_MIN = _f("EYES_OPEN_MIN", 0.15)               # current
 GAZE_YAW_AWAY_DEG = _f("GAZE_YAW_AWAY_DEG", 20.0)       # current
 GAZE_IRIS_H_AWAY = _f("GAZE_IRIS_H_AWAY", 0.15)         # current
 GAZE_PITCH_DOWN_DEG = _f("GAZE_PITCH_DOWN_DEG", 15.0)   # current

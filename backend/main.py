@@ -171,39 +171,30 @@ def receive_reference_photo(req: ReferencePhotoRequest):
     checks = [ReferenceCheck(**c) for c in res.get("checks", [])]
     issues = res.get("issues", [])
 
-    if not res.get("success", False):
-        return ReferenceResponse(
-            success=False,
-            faces_detected=res.get("faces_detected", 0),
-            quality_score=res.get("quality_score"),
-            checks=checks,
-            issues=issues,
-            message="Photo not accepted. See the checks below."
-        )
+    session_id = None
+    if res.get("embedding") is not None:
+        session_id = store.create(res["embedding"], res.get("metadata", {}))
+        try:
+            save_reference_session(
+                session_id=session_id,
+                reference_image=req.image,
+                reference_embedding=res["embedding"],
+                quality_score=res.get("quality_score"),
+                metadata=res.get("metadata", {})
+            )
+        except Exception:
+            pass
 
-    # Store reference embedding and metadata in in-memory session store
-    session_id = store.create(res["embedding"], res.get("metadata", {}))
-
-    # Persist reference session in PostgreSQL
-    try:
-        save_reference_session(
-            session_id=session_id,
-            reference_image=req.image,
-            reference_embedding=res["embedding"],
-            quality_score=res.get("quality_score"),
-            metadata=res.get("metadata", {})
-        )
-    except Exception:
-        pass
+    success = bool(res.get("success", False))
 
     return ReferenceResponse(
-        success=True,
+        success=success,
         session_id=session_id,
-        faces_detected=1,
-        quality_score=res.get("quality_score", 100.0),
+        faces_detected=res.get("faces_detected", 0),
+        quality_score=res.get("quality_score"),
         checks=checks,
-        issues=[],
-        message="Photo accepted."
+        issues=issues,
+        message="Photo accepted." if success else "Photo has warnings. See the checks below."
     )
 
 

@@ -43,6 +43,9 @@ export default function CameraCapture({
     initialReference?.checks || DEFAULT_CHECKS
   );
   const [networkError, setNetworkError] = useState(null);
+  const [activeSessionId, setActiveSessionId] = useState(
+    initialReference?.sessionId || null
+  );
 
   // Auto-start camera when landing on reference screen without photo
   useEffect(() => {
@@ -60,7 +63,7 @@ export default function CameraCapture({
   };
 
   const verifyPhoto = async (photoUrl) => {
-    if (!photoUrl) return;
+    if (!photoUrl) return false;
 
     setStepState('checking');
     setNetworkError(null);
@@ -79,8 +82,8 @@ export default function CameraCapture({
       const data = await res.json();
       setChecks(data.checks || DEFAULT_CHECKS);
 
-      if (data.success) {
-        setStepState('accepted');
+      if (data.session_id) {
+        setActiveSessionId(data.session_id);
         if (onAccepted) {
           onAccepted({
             photo: photoUrl,
@@ -91,10 +94,14 @@ export default function CameraCapture({
         if (onConfirmPhoto) {
           onConfirmPhoto(photoUrl, data.session_id, data);
         }
+      }
+
+      if (data.success) {
+        setStepState('accepted');
         return true;
       } else {
         setStepState('rejected');
-        return false;
+        return Boolean(data.session_id);
       }
     } catch (err) {
       console.error('Reference photo check failed:', err);
@@ -137,15 +144,19 @@ export default function CameraCapture({
     setCapturedPhoto(null);
     setChecks(DEFAULT_CHECKS);
     setNetworkError(null);
+    setActiveSessionId(null);
     setStepState('live');
     await startCamera();
   };
 
-  const handleUsePhoto = async () => {
-    if (!capturedPhoto || stepState === 'checking') return;
-    const ok = await verifyPhoto(capturedPhoto);
-    if (ok && onStartLive) {
-      onStartLive();
+  const handleStartLiveClick = async () => {
+    if (activeSessionId) {
+      if (onStartLive) onStartLive();
+      return;
+    }
+    if (capturedPhoto) {
+      await verifyPhoto(capturedPhoto);
+      if (onStartLive) onStartLive();
     }
   };
 
@@ -285,12 +296,20 @@ export default function CameraCapture({
           {stepState === 'rejected' && (
             <>
               <Button
-                variant="primary"
+                variant="secondary"
                 icon={RotateCcw}
                 onClick={handleRetake}
                 id="btn-retake-photo"
               >
                 Retake
+              </Button>
+              <Button
+                variant="primary"
+                icon={Play}
+                onClick={handleStartLiveClick}
+                id="btn-start-live-check-rejected"
+              >
+                Start live check
               </Button>
             </>
           )}
@@ -308,7 +327,7 @@ export default function CameraCapture({
               <Button
                 variant="primary"
                 icon={Play}
-                onClick={onStartLive}
+                onClick={handleStartLiveClick}
                 id="btn-start-live-check-main"
               >
                 Start live check
@@ -366,13 +385,13 @@ export default function CameraCapture({
           </div>
         )}
 
-        {/* Start Live Check Button (Accepted state) */}
-        {stepState === 'accepted' && (
+        {/* Start Live Check Button */}
+        {(stepState === 'accepted' || stepState === 'rejected' || stepState === 'preview') && (
           <Button
             variant="primary"
             size="lg"
             icon={Play}
-            onClick={onStartLive}
+            onClick={handleStartLiveClick}
             id="btn-start-live-check"
             className="btn-start-live"
           >
