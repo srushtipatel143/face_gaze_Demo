@@ -6,10 +6,15 @@ Endpoints:
 - POST /api/verification/frame: Real-time biometric face & gaze inference on a frame.
 - POST /api/verification/stop: Conclude session and return comprehensive statistics.
 - GET  /api/session/{session_id}: Query session state.
+- GET  /api/sessions: List past completed sessions.
+- GET  /api/session/{session_id}/report: Fetch stored session report.
+- GET  /api/session/{session_id}/stored: Query persisted PostgreSQL session.
+- GET  /api/session/{session_id}/failures: Query session failure proof images.
 - GET  /health: Service health check.
 """
 
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
+import logging
 import os
 import time
 from typing import Any, Dict, Optional
@@ -19,11 +24,13 @@ from fastapi.exceptions import ResponseValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+import config
+import db_models
 from db_models import (
     get_session_from_db,
     get_session_failures,
     save_reference_session,
-    save_session_results,
+    save_report,
 )
 from evaluator import evaluate
 from models.schemas import (
@@ -47,6 +54,20 @@ from session_store import (
 )
 from vision.engine import decode_base64_image, engine
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+log = logging.getLogger("face_gaze.api")
+
+
+@asynccontextmanager
+async def lifespan(app):
+    for attempt in range(1, config.DB_CONNECT_ATTEMPTS + 1):
+        if db_models.init_db():
+            log.info("Database connected")
+            break
+        log.warning("Database not ready (attempt %d/%d)", attempt, config.DB_CONNECT_ATTEMPTS)
+        time.sleep(config.DB_CONNECT_RETRY_S)
+    yield
+
 
 @contextmanager
 def session_errors():
@@ -60,11 +81,7 @@ def session_errors():
         raise HTTPException(status_code=409, detail=f"Session is not active ({e}).")
 
 
-app = FastAPI(
-    title="Face Verification & Eye-Gaze Tracking API",
-    description="Real-time biometric facial recognition and head/eye-gaze orientation inference service.",
-    version="1.0.0"
-)
+app = FastAPI(title="Identity & Attention Check API", version="1.1.0", lifespan=lifespan)
 
 # Configure CORS with explicit allowed origins and allow_credentials=False (L6)
 allowed_origins_env = os.getenv(
@@ -84,7 +101,7 @@ app.add_middleware(
 
 @app.exception_handler(ResponseValidationError)
 async def response_validation_exception_handler(request, exc):
-    print("RESPONSE VALIDATION ERROR:", exc.errors())
+    log.error("Response validation error: %s", exc.errors())
     return JSONResponse(
         status_code=500,
         content={"detail": "Response validation error", "errors": exc.errors()}
@@ -100,7 +117,8 @@ def home():
             "/api/reference",
             "/api/verification/start",
             "/api/verification/frame",
-            "/api/verification/stop"
+            "/api/verification/stop",
+            "/api/sessions"
         ]
     }
 
@@ -236,10 +254,20 @@ def stop_live_verification(req: VerificationStopRequest):
     report = evaluate(data.records, data.duration_s, data.calibration)
     report["session_id"] = req.session_id
     store.set_report(req.session_id, report)
-    try:
-        save_session_results(req.session_id, report)
-    except Exception:
-        pass
+    save_report(req.session_id, report, data.records)
+    return report
+
+
+@app.get("/api/sessions")
+def list_sessions(limit: int = 50):
+    return {"sessions": db_models.list_sessions(min(max(limit, 1), 200))}
+
+
+@app.get("/api/session/{session_id}/report")
+def get_session_report(session_id: str):
+    report = db_models.get_report(session_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Report not found.")
     return report
 
 

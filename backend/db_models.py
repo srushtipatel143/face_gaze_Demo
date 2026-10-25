@@ -3,27 +3,28 @@ PostgreSQL Database Models and Persistence Layer
 Stores reference face data, verification session results, and failure proof images.
 """
 
-import os
-import logging
 from datetime import datetime
-from typing import Optional, Dict, Any, List
+import logging
+import os
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 from sqlalchemy import (
-    create_engine,
     Column,
-    String,
-    Integer,
-    Float,
-    Text,
     DateTime,
+    Float,
+    ForeignKey,
+    Integer,
     JSON,
-    ForeignKey
+    String,
+    Text,
+    create_engine,
 )
-from sqlalchemy.orm import declarative_base, sessionmaker, relationship
-
-from pathlib import Path
 from sqlalchemy.engine import URL
+from sqlalchemy.orm import declarative_base, relationship, sessionmaker
+
+import config
 
 # Load environment variables from backend/.env
 env_file = Path(__file__).parent / ".env"
@@ -38,6 +39,7 @@ logger = logging.getLogger("face_gaze.db")
 engine = None
 SessionLocal = None
 Base = declarative_base()
+_sessionlocal_warned = False
 
 
 def get_candidate_db_urls() -> List[Any]:
@@ -53,7 +55,6 @@ def get_candidate_db_urls() -> List[Any]:
     dbname = os.getenv("POSTGRES_DB", "face_gaze_db")
     primary_host = os.getenv("POSTGRES_HOST", "face_gaze_postgres")
 
-    # Preferred: constructed URL with proper URL escaping
     for host in [primary_host, "face_gaze_postgres", "localhost", "127.0.0.1"]:
         if host and host not in [c.host for c in candidates if hasattr(c, "host")]:
             try:
@@ -70,7 +71,6 @@ def get_candidate_db_urls() -> List[Any]:
             except Exception:
                 pass
 
-    # Direct env DATABASE_URL if provided
     raw_url = os.getenv("DATABASE_URL")
     if raw_url:
         if not raw_url.startswith("postgresql+psycopg2://") and raw_url.startswith("postgresql://"):
@@ -79,7 +79,6 @@ def get_candidate_db_urls() -> List[Any]:
             candidates.append(raw_url)
 
     return candidates
-
 
 
 class VerificationSession(Base):
@@ -122,6 +121,12 @@ class VerificationSession(Base):
     metrics = Column(JSON, nullable=True)
     intervals = Column(JSON, nullable=True)
 
+    # Full report and records persistence (Section 9)
+    report = Column(JSON, nullable=True)
+    records = Column(JSON, nullable=True)
+    config_snapshot = Column(JSON, nullable=True)
+    rules_version = Column(String(32), nullable=True)
+
     # Relationship to failure proof snapshots
     failures = relationship("VerificationFailure", back_populates="session", cascade="all, delete-orphan")
 
@@ -129,11 +134,7 @@ class VerificationSession(Base):
 class VerificationFailure(Base):
     """
     Proof of Failure Snapshot
-    Captures the visual evidence image and metadata when a violation occurs:
-    - Different person detected (NO_MATCH)
-    - Multiple faces detected
-    - No face detected
-    - Sustained gaze diversion (LOOKING_AWAY)
+    Captures the visual evidence image and metadata when a violation occurs.
     """
     __tablename__ = "verification_failures"
 
@@ -142,7 +143,7 @@ class VerificationFailure(Base):
     timestamp = Column(DateTime, default=datetime.utcnow, nullable=False)
     t_s = Column(Float, nullable=True)  # Timestamp offset in seconds into the session
 
-    failure_type = Column(String(64), nullable=False)  # DIFFERENT_PERSON, MULTIPLE_FACES, NO_FACE, LOOKING_AWAY
+    failure_type = Column(String(64), nullable=False)
     reason = Column(Text, nullable=True)
     similarity_score = Column(Float, nullable=True)
 
@@ -162,8 +163,7 @@ def init_db() -> bool:
             continue
         try:
             temp_engine = create_engine(url, pool_pre_ping=True, connect_args={"connect_timeout": 3})
-            # Test connection
-            with temp_engine.connect() as conn:
+            with temp_engine.connect():
                 pass
             Base.metadata.create_all(bind=temp_engine)
             engine = temp_engine
@@ -179,9 +179,11 @@ def init_db() -> bool:
 
 def get_db_session():
     """Context manager or generator for DB session."""
+    global _sessionlocal_warned
     if SessionLocal is None:
-        init_db()
-    if SessionLocal is None:
+        if not _sessionlocal_warned:
+            logger.warning("Database SessionLocal is not initialized. Database operations will be skipped.")
+            _sessionlocal_warned = True
         return None
     return SessionLocal()
 
@@ -198,7 +200,6 @@ def save_reference_session(
     if not db:
         return False
     try:
-        # Convert numpy array to list if needed
         emb_list = None
         if reference_embedding is not None:
             if hasattr(reference_embedding, "tolist"):
@@ -269,64 +270,91 @@ def save_failure_proof(
         db.close()
 
 
-def save_session_results(session_id: str, summary: Dict[str, Any]) -> bool:
-    """Update PostgreSQL session with final verdicts, compliance metrics, and intervals."""
+def save_report(session_id: str, report: Dict[str, Any], records: List[Any]) -> bool:
     db = get_db_session()
     if not db:
         return False
     try:
-        sess_obj = db.query(VerificationSession).filter_by(session_id=session_id).first()
-        if not sess_obj:
-            sess_obj = VerificationSession(session_id=session_id)
-            db.add(sess_obj)
+        s = db.query(VerificationSession).filter_by(session_id=session_id).first()
+        if not s:
+            s = VerificationSession(session_id=session_id)
+            db.add(s)
+        m = report["metrics"]
+        s.status = "completed"
+        s.duration_seconds = report["duration_s"]
+        s.total_frames = report["total_frames"]
+        s.matched_frames = m["matched_frames"]
+        s.unmatched_frames = m["unmatched_frames"]
+        s.no_face_frames = m["no_face_frames"]
+        s.multiple_faces_frames = m["multiple_faces_frames"]
+        s.match_percentage = m["match_pct"]
+        s.looking_away_percentage = m["away_pct"]
+        s.face_verdict = report["face"]["verdict"]
+        s.gaze_verdict = report["gaze"]["verdict"]
+        s.overall_verdict = report["overall_verdict"]
+        s.verdict_reasons = report["face"]["reasons"] + report["gaze"]["reasons"]
+        s.metrics = m
+        s.intervals = [{k: v for k, v in iv.items() if k != "thumbnail"} for iv in report["intervals"]]
+        s.report = report
+        s.records = [r.to_dict(include_thumbnail=False) if hasattr(r, "to_dict") else {k: v for k, v in r.items() if k != "thumbnail"} for r in records]
+        s.config_snapshot = config.snapshot()
+        s.rules_version = report["rules_version"]
 
-        sess_obj.status = summary.get("status", "completed")
-        sess_obj.duration_seconds = summary.get("duration_seconds")
-        sess_obj.total_frames = summary.get("total_frames", 0)
-        sess_obj.matched_frames = summary.get("matched_frames", 0)
-        sess_obj.unmatched_frames = summary.get("unmatched_frames", 0)
-        sess_obj.no_face_frames = summary.get("no_face_frames", 0)
-        sess_obj.multiple_faces_frames = summary.get("multiple_faces_frames", 0)
-        sess_obj.match_percentage = summary.get("match_percentage", 0.0)
-        sess_obj.looking_away_percentage = summary.get("looking_away_percentage", 0.0)
-
-        # Verdicts
-        face_v = summary.get("face", {})
-        gaze_v = summary.get("gaze", {})
-        sess_obj.face_verdict = face_v.get("verdict") if isinstance(face_v, dict) else str(face_v)
-        sess_obj.gaze_verdict = gaze_v.get("verdict") if isinstance(gaze_v, dict) else str(gaze_v)
-        sess_obj.overall_verdict = summary.get("overall_verdict")
-
-        reasons = []
-        if isinstance(face_v, dict) and face_v.get("reasons"):
-            reasons.extend(face_v["reasons"])
-        if isinstance(gaze_v, dict) and gaze_v.get("reasons"):
-            reasons.extend(gaze_v["reasons"])
-        sess_obj.verdict_reasons = reasons
-
-        sess_obj.metrics = summary.get("metrics")
-        sess_obj.intervals = summary.get("intervals")
-
-        # Save any interval failure thumbnails as failure proofs if not already recorded
-        for iv in summary.get("intervals", []):
-            thumb = iv.get("thumbnail")
-            if thumb:
-                iv_type = iv.get("type", "ANOMALY").upper()
-                iv_details = iv.get("details", "")
-                save_failure_proof(
-                    session_id=session_id,
-                    failure_type=iv_type,
-                    reason=iv_details,
-                    proof_image=thumb,
-                    t_s=iv.get("start_t")
-                )
-
+        db.query(VerificationFailure).filter_by(session_id=session_id).delete()
+        for iv in report["intervals"]:
+            if iv.get("thumbnail"):
+                db.add(VerificationFailure(
+                    session_id=session_id, failure_type=iv["type"].upper(),
+                    reason=iv["message"], proof_image=iv["thumbnail"], t_s=iv["start_s"]))
         db.commit()
         return True
-    except Exception as e:
-        logger.error("Failed to save session results in DB: %s", e)
+    except Exception:
+        logger.exception("save_report failed for %s", session_id)
         db.rollback()
         return False
+    finally:
+        db.close()
+
+
+def list_sessions(limit: int = 50) -> List[Dict[str, Any]]:
+    db = get_db_session()
+    if not db:
+        return []
+    try:
+        rows = (
+            db.query(VerificationSession)
+            .filter(
+                VerificationSession.status == "completed",
+                VerificationSession.report.isnot(None)
+            )
+            .order_by(VerificationSession.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+        return [
+            {
+                "session_id": r.session_id,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "duration_seconds": r.duration_seconds,
+                "face_verdict": r.face_verdict,
+                "gaze_verdict": r.gaze_verdict,
+                "total_frames": r.total_frames,
+            }
+            for r in rows
+        ]
+    finally:
+        db.close()
+
+
+def get_report(session_id: str) -> Optional[Dict[str, Any]]:
+    db = get_db_session()
+    if not db:
+        return None
+    try:
+        s = db.query(VerificationSession).filter_by(session_id=session_id).first()
+        if not s or not s.report:
+            return None
+        return s.report
     finally:
         db.close()
 
@@ -358,6 +386,10 @@ def get_session_from_db(session_id: str) -> Optional[Dict[str, Any]]:
             "verdict_reasons": sess.verdict_reasons,
             "metrics": sess.metrics,
             "intervals": sess.intervals,
+            "report": sess.report,
+            "records": sess.records,
+            "config_snapshot": sess.config_snapshot,
+            "rules_version": sess.rules_version,
         }
     finally:
         db.close()
