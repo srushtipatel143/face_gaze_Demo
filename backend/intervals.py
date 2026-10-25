@@ -77,6 +77,8 @@ class IntervalTracker:
             if self.run_start is None:
                 self.run_start = t_s
                 self.run_thumbnail = thumbnail
+            elif self.run_thumbnail is None and thumbnail is not None:
+                self.run_thumbnail = thumbnail
             self.run_len += 1
             self.last_anomaly_t = t_s
             if label:
@@ -91,6 +93,7 @@ class IntervalTracker:
                     "duration_s": None,
                     "direction": self._direction(),
                     "thumbnail": self.run_thumbnail,
+                    "evidence_image": self.run_thumbnail,
                 }
                 self.current["message"] = interval_message(self.current)
                 return ("opened", dict(self.current))
@@ -122,6 +125,9 @@ class IntervalTracker:
         self.current["duration_s"] = round(max(0.0, self.current["end_s"] - self.current["start_s"]), 2)
         self.current["direction"] = self._direction()
         self.current["message"] = interval_message(self.current)
+        thumb = self.current.get("thumbnail") or self.run_thumbnail
+        self.current["thumbnail"] = thumb
+        self.current["evidence_image"] = thumb
         closed = dict(self.current)
         self.intervals.append(closed)
         self.current = None

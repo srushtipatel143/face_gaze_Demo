@@ -279,9 +279,9 @@ export default function SessionReport({
               </span>
             </div>
             <div className="selected-evidence">
-              {selectedInterval.evidence_image ? (
+              {(selectedInterval.evidence_image || selectedInterval.thumbnail || selectedInterval.proof_image) ? (
                 <img
-                  src={evidenceSrc(selectedInterval.evidence_image)}
+                  src={evidenceSrc(selectedInterval.evidence_image || selectedInterval.thumbnail || selectedInterval.proof_image)}
                   alt={selectedInterval.message}
                   className="selected-evidence-thumb"
                 />
@@ -330,9 +330,9 @@ export default function SessionReport({
                         <td className="num">{formatSeconds(iv.duration_s)}</td>
                         <td>{iv.message}</td>
                         <td>
-                          {iv.evidence_image ? (
+                          {(iv.evidence_image || iv.thumbnail || iv.proof_image) ? (
                             <img
-                              src={evidenceSrc(iv.evidence_image)}
+                              src={evidenceSrc(iv.evidence_image || iv.thumbnail || iv.proof_image)}
                               alt={iv.message}
                               className="issue-thumb"
                               onClick={(e) => {
