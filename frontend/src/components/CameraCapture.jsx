@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   Camera,
   RotateCcw,
@@ -46,6 +46,7 @@ export default function CameraCapture({
   const [activeSessionId, setActiveSessionId] = useState(
     initialReference?.sessionId || null
   );
+  const sessionIdRef = useRef(initialReference?.sessionId || null);
 
   // Auto-start camera when landing on reference screen without photo
   useEffect(() => {
@@ -63,7 +64,7 @@ export default function CameraCapture({
   };
 
   const verifyPhoto = async (photoUrl) => {
-    if (!photoUrl) return false;
+    if (!photoUrl) return null;
 
     setStepState('checking');
     setNetworkError(null);
@@ -83,6 +84,7 @@ export default function CameraCapture({
       setChecks(data.checks || DEFAULT_CHECKS);
 
       if (data.session_id) {
+        sessionIdRef.current = data.session_id;
         setActiveSessionId(data.session_id);
         if (onAccepted) {
           onAccepted({
@@ -98,16 +100,15 @@ export default function CameraCapture({
 
       if (data.success) {
         setStepState('accepted');
-        return true;
       } else {
         setStepState('rejected');
-        return Boolean(data.session_id);
       }
+      return data;
     } catch (err) {
       console.error('Reference photo check failed:', err);
       setNetworkError('Could not reach the verification service. Try again.');
       setStepState('preview');
-      return false;
+      return null;
     }
   };
 
@@ -144,19 +145,20 @@ export default function CameraCapture({
     setCapturedPhoto(null);
     setChecks(DEFAULT_CHECKS);
     setNetworkError(null);
+    sessionIdRef.current = null;
     setActiveSessionId(null);
     setStepState('live');
     await startCamera();
   };
 
   const handleStartLiveClick = async () => {
-    if (activeSessionId) {
-      if (onStartLive) onStartLive();
-      return;
+    let sid = sessionIdRef.current || activeSessionId;
+    if (!sid && capturedPhoto) {
+      const data = await verifyPhoto(capturedPhoto);
+      sid = data?.session_id || sessionIdRef.current;
     }
-    if (capturedPhoto) {
-      await verifyPhoto(capturedPhoto);
-      if (onStartLive) onStartLive();
+    if (onStartLive) {
+      onStartLive(sid);
     }
   };
 

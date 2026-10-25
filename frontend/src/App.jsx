@@ -47,12 +47,19 @@ export default function App() {
     setView('history');
   };
 
+  const [activeSessionId, setActiveSessionId] = useState(null);
+
   const handlePhotoConfirmed = (photo, sessionId, checks) => {
+    if (sessionId) setActiveSessionId(sessionId);
     setReference({ photo, sessionId, checks });
   };
 
-  const handleStartLive = () => {
-    if (!reference?.sessionId) return;
+  const handleStartLive = (directSessionId) => {
+    const sid = (typeof directSessionId === 'string' && directSessionId) ? directSessionId : reference?.sessionId;
+    if (sid) {
+      setActiveSessionId(sid);
+      setReference((prev) => ({ ...(prev || {}), sessionId: sid }));
+    }
     setView('live');
   };
 
@@ -121,7 +128,7 @@ export default function App() {
 
         {view === 'live' && (
           <LiveVerification
-            sessionId={reference?.sessionId}
+            sessionId={activeSessionId || reference?.sessionId}
             referencePhoto={reference?.photo}
             onStopVerification={handleStopVerification}
             onBackToCapture={handleBackToCapture}

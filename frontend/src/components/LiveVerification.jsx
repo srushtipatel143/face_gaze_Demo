@@ -195,11 +195,21 @@ export default function LiveVerification({
     }
   }, [sessionId, camera.videoRef, drawOverlay]);
 
-  // Mount effect: Start session and start camera
+  // Mount effect: Start camera immediately and start session
   useEffect(() => {
     let mounted = true;
 
-    async function init() {
+    // Start camera immediately so video preview starts right away
+    camera.start().catch((camErr) => {
+      console.warn('Initial camera start error:', camErr);
+    });
+
+    async function initSession() {
+      if (!sessionId) {
+        console.warn('LiveVerification mounted without sessionId yet');
+        return;
+      }
+
       try {
         const startRes = await fetch(`${API_BASE}/api/verification/start`, {
           method: 'POST',
@@ -210,10 +220,6 @@ export default function LiveVerification({
         if (!startRes.ok) {
           throw new Error(`Start request failed (${startRes.status})`);
         }
-
-        if (mounted) {
-          await camera.start();
-        }
       } catch (err) {
         console.error('Init live check error:', err);
         if (mounted) {
@@ -222,7 +228,7 @@ export default function LiveVerification({
       }
     }
 
-    init();
+    initSession();
 
     return () => {
       mounted = false;
