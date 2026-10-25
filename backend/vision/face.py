@@ -67,7 +67,14 @@ class FaceMatcher:
 
 
 def select_faces(faces: np.ndarray) -> Tuple[Optional[np.ndarray], int]:
-    """Section 4 version: first face, raw count. Replaced in section 5."""
+    """Main face = largest box. Another face counts only if its area is at least
+    SECOND_FACE_MIN_AREA_RATIO of the main face's area. Returns (main_row, counted_faces)."""
     if len(faces) == 0:
         return None, 0
-    return faces[0], len(faces)
+    areas = faces[:, 2] * faces[:, 3]
+    order = np.argsort(-areas)
+    main = faces[order[0]]
+    main_area = float(areas[order[0]])
+    others = sum(1 for i in order[1:]
+                 if float(areas[i]) >= config.SECOND_FACE_MIN_AREA_RATIO * main_area)
+    return main, 1 + others

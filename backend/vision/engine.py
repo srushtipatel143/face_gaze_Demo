@@ -59,10 +59,23 @@ def make_thumbnail(image: np.ndarray) -> Optional[str]:
 
 
 def pick_landmarks(mesh_results, box: Dict[str, int], img_w: int, img_h: int):
-    """Section 4 version: first face. Replaced in section 5."""
     if not mesh_results.multi_face_landmarks:
         return None
-    return mesh_results.multi_face_landmarks[0]
+    cx = box["x"] + box["width"] / 2.0
+    cy = box["y"] + box["height"] / 2.0
+    best, best_d = None, None
+    for lm in mesh_results.multi_face_landmarks:
+        xs = [p.x * img_w for p in lm.landmark]
+        ys = [p.y * img_h for p in lm.landmark]
+        mx = (min(xs) + max(xs)) / 2.0
+        my = (min(ys) + max(ys)) / 2.0
+        d = (mx - cx) ** 2 + (my - cy) ** 2
+        if best_d is None or d < best_d:
+            best, best_d = lm, d
+    # Reject if the closest mesh face is far away (more than one box width)
+    if best_d is not None and best_d ** 0.5 > box["width"]:
+        return None
+    return best
 
 
 def assess_quality(image: np.ndarray, face_box: Optional[Dict[str, int]] = None) -> Tuple[float, List[str]]:
@@ -157,8 +170,9 @@ class VisionEngine:
         h, w = image.shape[:2]
         with self._lock:
             faces = self.face.detect(image)
+            main, count = select_faces(faces)
 
-            if len(faces) == 0:
+            if count == 0:
                 return {
                     "success": False,
                     "faces_detected": 0,
@@ -166,25 +180,23 @@ class VisionEngine:
                     "message": "No face detected. Please ensure your face is well-lit and directly facing the webcam."
                 }
 
-            face_count = len(faces)
-            if face_count > 1:
+            if count > 1:
                 return {
                     "success": False,
-                    "faces_detected": face_count,
-                    "issues": [f"Multiple faces detected ({face_count})"],
-                    "message": f"Multiple faces detected ({face_count}). Only one person should be present in the photo."
+                    "faces_detected": count,
+                    "issues": [f"Multiple faces detected ({count})"],
+                    "message": f"Multiple faces detected ({count}). Only one person should be present in the photo."
                 }
 
-            face_row = faces[0]
-            face_box = row_to_box(face_row, w, h)
+            face_box = row_to_box(main, w, h)
             quality_score, issues = assess_quality(image, face_box)
 
             rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             mesh_results = self.mesh.process(rgb)
-            if not mesh_results.multi_face_landmarks:
+            landmarks = pick_landmarks(mesh_results, face_box, w, h)
+            if landmarks is None:
                 issues.append("Could not detect facial landmarks. Ensure face is unobstructed and facing camera.")
             else:
-                landmarks = mesh_results.multi_face_landmarks[0]
                 pitch, yaw, _ = estimate_head_pose(landmarks, w, h)
                 if abs(yaw) > config.REF_MAX_POSE_DEG or abs(pitch) > config.REF_MAX_POSE_DEG:
                     issues.append(f"Face is turned away (yaw: {yaw:.1f}°, pitch: {pitch:.1f}°, maximum ±{config.REF_MAX_POSE_DEG}°). Please look straight at the camera.")
@@ -201,7 +213,7 @@ class VisionEngine:
                     "message": f"Reference photo rejected: {'; '.join(issues)}"
                 }
 
-            embedding = self.face.embed(image, face_row)
+            embedding = self.face.embed(image, main)
 
             return {
                 "success": True,
