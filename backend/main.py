@@ -15,6 +15,7 @@ from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 
 from database import db
+from db_models import get_session_from_db, get_session_failures
 from models.schemas import (
     ReferencePhotoRequest,
     ReferenceResponse,
@@ -113,10 +114,11 @@ def receive_reference_photo(req: ReferencePhotoRequest):
             message=res.get("message", "Reference face validation failed.")
         )
 
-    # Store reference embedding and metadata in database session
+    # Store reference embedding, image, and metadata in database session
     session_id = db.create_session(
         reference_embedding=res["embedding"],
-        image_metadata=res.get("metadata", {})
+        image_metadata=res.get("metadata", {}),
+        reference_image=req.image
     )
 
     return ReferenceResponse(
@@ -274,3 +276,25 @@ def get_session_info(session_id: str):
         "center_gaze_frames": sess["center_gaze_frames"],
         "events_count": len(sess["events"])
     }
+
+@app.get("/api/session/{session_id}/stored")
+def get_stored_session_data(session_id: str):
+    """Retrieve persisted session record, verdicts, and compliance data from PostgreSQL."""
+    data = get_session_from_db(session_id)
+    if not data:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Session '{session_id}' not found in PostgreSQL database."
+        )
+    return data
+
+@app.get("/api/session/{session_id}/failures")
+def get_failure_proof_images(session_id: str):
+    """Retrieve all proof-of-failure visual snapshots and violation records for this session."""
+    failures = get_session_failures(session_id)
+    return {
+        "session_id": session_id,
+        "total_failures": len(failures),
+        "failures": failures
+    }
+

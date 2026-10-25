@@ -16,13 +16,34 @@ from evaluator import (
     evaluate_gaze_verdict,
     evaluate_session_records,
 )
+try:
+    from db_models import (
+        init_db,
+        save_reference_session,
+        save_failure_proof,
+        save_session_results,
+        get_session_from_db,
+        get_session_failures
+    )
+except ImportError:
+    init_db = lambda: False
+    save_reference_session = lambda *a, **kw: False
+    save_failure_proof = lambda *a, **kw: False
+    save_session_results = lambda *a, **kw: False
+    get_session_from_db = lambda *a, **kw: None
+    get_session_failures = lambda *a, **kw: []
 
 class SessionDatabase:
     def __init__(self):
         self._lock = Lock()
         self._sessions: Dict[str, Dict[str, Any]] = {}
+        # Try initializing database tables
+        try:
+            init_db()
+        except Exception:
+            pass
 
-    def create_session(self, reference_embedding: Any, image_metadata: Dict[str, Any]) -> str:
+    def create_session(self, reference_embedding: Any, image_metadata: Dict[str, Any], reference_image: Optional[str] = None) -> str:
         """Create a new verification session with the reference face embedding."""
         session_id = f"sess_{uuid.uuid4().hex[:12]}"
         timestamp = time.time()
@@ -32,6 +53,7 @@ class SessionDatabase:
                 "session_id": session_id,
                 "created_at": timestamp,
                 "status": "initialized",  # initialized | active | completed | terminated
+                "reference_image": reference_image,
                 "reference_embedding": reference_embedding,
                 "reference_metadata": image_metadata,
                 "start_time": None,
@@ -65,6 +87,19 @@ class SessionDatabase:
                 "recent_similarities": [],
                 "records": [],
             }
+
+        # Persist reference face data & session in PostgreSQL
+        try:
+            save_reference_session(
+                session_id=session_id,
+                reference_image=reference_image,
+                reference_embedding=reference_embedding,
+                quality_score=image_metadata.get("quality_score"),
+                metadata=image_metadata
+            )
+        except Exception:
+            pass
+
         return session_id
 
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
@@ -237,6 +272,17 @@ class SessionDatabase:
                     "pitch": result.get("gaze_pitch"),
                     "message": f"User looked away ({gaze_dir.replace('_', ' ').lower() if gaze_dir != 'UNKNOWN' else 'sustained'})."
                 })
+                if rec.get("thumbnail"):
+                    try:
+                        save_failure_proof(
+                            session_id=session_id,
+                            failure_type="LOOKING_AWAY",
+                            reason=f"User looked away ({gaze_dir})",
+                            proof_image=rec["thumbnail"],
+                            t_s=t_s
+                        )
+                    except Exception:
+                        pass
             elif tracker_event == "CLOSED_OK":
                 self._internal_add_event(sess, "GAZE_RETURNED", {
                     "message": "User eye-gaze returned to center focus."
@@ -259,6 +305,18 @@ class SessionDatabase:
                     self._internal_add_event(sess, "IDENTITY_MISMATCH", {
                         "message": f"Face does not match reference identity (similarity: {result.get('similarity')})."
                     })
+                    if rec.get("thumbnail"):
+                        try:
+                            save_failure_proof(
+                                session_id=session_id,
+                                failure_type="DIFFERENT_PERSON",
+                                reason=f"Face mismatch (similarity: {result.get('similarity')})",
+                                proof_image=rec["thumbnail"],
+                                similarity_score=result.get("similarity"),
+                                t_s=t_s
+                            )
+                        except Exception:
+                            pass
             elif status == "MULTIPLE_FACES":
                 sess["consecutive_multiple_faces"] += 1
                 sess["consecutive_match"] = 0
@@ -269,6 +327,17 @@ class SessionDatabase:
                     self._internal_add_event(sess, "MULTIPLE_FACES", {
                         "message": f"Second face detected in camera view ({result.get('faces_detected')} faces visible)."
                     })
+                    if rec.get("thumbnail"):
+                        try:
+                            save_failure_proof(
+                                session_id=session_id,
+                                failure_type="MULTIPLE_FACES",
+                                reason=f"Multiple faces detected ({result.get('faces_detected')})",
+                                proof_image=rec["thumbnail"],
+                                t_s=t_s
+                            )
+                        except Exception:
+                            pass
             elif status == "NO_FACE":
                 sess["consecutive_no_face"] += 1
                 sess["consecutive_match"] = 0
@@ -279,6 +348,17 @@ class SessionDatabase:
                     self._internal_add_event(sess, "FACE_LOST", {
                         "message": "User face disappeared from camera view."
                     })
+                    if rec.get("thumbnail"):
+                        try:
+                            save_failure_proof(
+                                session_id=session_id,
+                                failure_type="NO_FACE",
+                                reason="Face disappeared from camera view",
+                                proof_image=rec["thumbnail"],
+                                t_s=t_s
+                            )
+                        except Exception:
+                            pass
             elif status == "MATCH":
                 sess["consecutive_match"] += 1
                 sess["consecutive_no_match"] = 0
@@ -396,7 +476,13 @@ class SessionDatabase:
             # Discard reference biometric embedding now that verification session is concluded (L5)
             sess["reference_embedding"] = None
 
-            return summary
+        # Persist final verdicts, metrics, intervals, and failure proofs in PostgreSQL
+        try:
+            save_session_results(session_id, summary)
+        except Exception:
+            pass
+
+        return summary
 
     def cleanup_old_sessions(self, max_age_seconds: int = 3600):
         """Remove sessions older than max_age_seconds (L5)."""
