@@ -148,8 +148,8 @@ class VisionEngine:
 
         # 1. Sharpness / Blur check on face crop using Laplacian variance
         laplacian_var = float(cv2.Laplacian(face_gray, cv2.CV_64F).var())
-        if laplacian_var < 55.0:
-            issues.append(f"Face is blurry (sharpness: {laplacian_var:.1f}, min: 55.0). Please hold still and refocus.")
+        if laplacian_var < 40.0:
+            issues.append(f"Face is blurry (sharpness: {laplacian_var:.1f}, min: 40.0). Please hold still and refocus.")
 
         # 2. Brightness check on face crop
         mean_brightness = float(np.mean(face_gray))
@@ -164,6 +164,28 @@ class VisionEngine:
         quality_score = max(5.0, min(100.0, round(sharpness_score + brightness_score, 1)))
 
         return quality_score, issues
+
+    @staticmethod
+    def create_thumbnail_base64(image: np.ndarray, max_dim: int = 240, quality: int = 65) -> str:
+        """
+        Resize image preserving aspect ratio and encode to base64 JPEG data URL
+        for lightweight evidence/proof storage in PostgreSQL.
+        """
+        try:
+            h, w = image.shape[:2]
+            if max(h, w) > max_dim:
+                scale = max_dim / float(max(h, w))
+                nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
+                resized = cv2.resize(image, (nw, nh), interpolation=cv2.INTER_AREA)
+            else:
+                resized = image
+            success, buffer = cv2.imencode('.jpg', resized, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+            if not success:
+                return ""
+            b64 = base64.b64encode(buffer).decode('utf-8')
+            return f"data:image/jpeg;base64,{b64}"
+        except Exception:
+            return ""
 
     @staticmethod
     def extract_face_box(landmarks, img_w: int, img_h: int) -> Dict[str, int]:
@@ -496,6 +518,7 @@ class VisionEngine:
             face_count = len(faces)
 
             if face_count == 0:
+                thumb = self.create_thumbnail_base64(image)
                 return {
                     "faces_detected": 0,
                     "verification_status": "NO_FACE",
@@ -508,7 +531,8 @@ class VisionEngine:
                     "iris_h": None,
                     "iris_v": None,
                     "calibrating": False,
-                    "face_box": None
+                    "face_box": None,
+                    "thumbnail": thumb
                 }
 
             if face_count > 1:
@@ -519,6 +543,7 @@ class VisionEngine:
                     "width": int(first_face[2]),
                     "height": int(first_face[3])
                 }
+                thumb = self.create_thumbnail_base64(image)
                 return {
                     "faces_detected": face_count,
                     "verification_status": "MULTIPLE_FACES",
@@ -531,7 +556,8 @@ class VisionEngine:
                     "iris_h": None,
                     "iris_v": None,
                     "calibrating": False,
-                    "face_box": first_box
+                    "face_box": first_box,
+                    "thumbnail": thumb
                 }
 
             # Exactly 1 face detected by YuNet
@@ -580,6 +606,11 @@ class VisionEngine:
             else:
                 verification_status = "NO_MATCH"
 
+            # Generate evidence proof thumbnail if there is a match failure or looking away
+            thumb = None
+            if verification_status == "NO_MATCH" or gaze_res.get("is_looking_away") is True:
+                thumb = self.create_thumbnail_base64(image)
+
             return {
                 "faces_detected": 1,
                 "verification_status": verification_status,
@@ -594,7 +625,8 @@ class VisionEngine:
                 "iris_h": gaze_res.get("iris_h"),
                 "iris_v": gaze_res.get("iris_v"),
                 "calibrating": gaze_res.get("calibrating", False),
-                "face_box": face_box
+                "face_box": face_box,
+                "thumbnail": thumb
             }
 
 

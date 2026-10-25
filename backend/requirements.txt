@@ -6,3 +6,7 @@ opencv-python-headless>=4.8.0
 numpy>=1.24.0,<3.0.0
 mediapipe==0.10.14
 pytest>=8.0.0
+sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.9
+python-dotenv>=1.0.0
+
