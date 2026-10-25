@@ -13,17 +13,18 @@ from typing import Tuple, Optional, Dict, Any, List
 import numpy as np
 import cv2
 import mediapipe as mp
+import config
 
 WEIGHTS = Path(__file__).parent / "weights"
-SFACE_MATCH_THRESHOLD = 0.363  # Cosine similarity threshold for OpenCV SFace
-EYES_OPEN_MIN = 0.18  # Eyelid gap / eye width ratio below which eyes are considered closed (blink)
+SFACE_MATCH_THRESHOLD = config.SFACE_MATCH_THRESHOLD  # Cosine similarity threshold for OpenCV SFace
+EYES_OPEN_MIN = config.EYES_OPEN_MIN  # Eyelid gap / eye width ratio below which eyes are considered closed (blink)
 
 def ensure_weights():
     """Ensure ONNX model weights exist locally in backend/weights/."""
     WEIGHTS.mkdir(parents=True, exist_ok=True)
     models = {
-        "face_detection_yunet_2023mar.onnx": "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
-        "face_recognition_sface_2021dec.onnx": "https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx"
+        config.MODEL_FILES["detector"]: "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
+        config.MODEL_FILES["recognizer"]: "https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx"
     }
     for filename, url in models.items():
         dest = WEIGHTS / filename
@@ -54,8 +55,8 @@ ANCHOR_LANDMARKS = [
 MODEL_POINTS_3D = np.array([
     (0.0, 0.0, 0.0),             # Nose tip (index 1)
     (0.0, -330.0, -65.0),        # Chin (index 152)
-    (-225.0, 170.0, -135.0),     # Left eye corner (index 33)
-    (225.0, 170.0, -135.0),      # Right eye corner (index 263)
+    (-225.0, 170.0, -135),     # Left eye corner (index 33)
+    (225.0, 170.0, -135),      # Right eye corner (index 263)
     (-150.0, -150.0, -125.0),    # Left mouth corner (index 61)
     (150.0, -150.0, -125.0)      # Right mouth corner (index 291)
 ], dtype=np.float64)
@@ -81,13 +82,13 @@ class VisionEngine:
             min_detection_confidence=0.6
         )
         # OpenCV YuNet Face Detector
-        yunet_file = str(WEIGHTS / "face_detection_yunet_2023mar.onnx")
+        yunet_file = str(WEIGHTS / config.MODEL_FILES["detector"])
         self.detector = cv2.FaceDetectorYN.create(
             yunet_file, "", (320, 320),
-            score_threshold=0.8,
+            score_threshold=config.YUNET_SCORE_THRESHOLD,
         )
         # OpenCV SFace Face Recognizer
-        sface_file = str(WEIGHTS / "face_recognition_sface_2021dec.onnx")
+        sface_file = str(WEIGHTS / config.MODEL_FILES["recognizer"])
         self.recognizer = cv2.FaceRecognizerSF.create(
             sface_file, ""
         )
@@ -136,7 +137,7 @@ class VisionEngine:
             face_area = fw * fh
             img_area = w * h
             face_ratio = face_area / float(img_area)
-            if face_ratio < 0.05 or fw < 80 or fh < 80:
+            if face_ratio < config.REF_MIN_FACE_RATIO or fw < config.REF_MIN_FACE_PX or fh < config.REF_MIN_FACE_PX:
                 issues.append("Face is too small or too far from the camera. Please move closer.")
         else:
             face_crop = image
@@ -148,25 +149,25 @@ class VisionEngine:
 
         # 1. Sharpness / Blur check on face crop using Laplacian variance
         laplacian_var = float(cv2.Laplacian(face_gray, cv2.CV_64F).var())
-        if laplacian_var < 40.0:
-            issues.append(f"Face is blurry (sharpness: {laplacian_var:.1f}, min: 40.0). Please hold still and refocus.")
+        if laplacian_var < config.REF_MIN_SHARPNESS:
+            issues.append(f"Face is blurry (sharpness: {laplacian_var:.1f}, min: {config.REF_MIN_SHARPNESS}). Please hold still and refocus.")
 
         # 2. Brightness check on face crop
         mean_brightness = float(np.mean(face_gray))
-        if mean_brightness < 45.0:
-            issues.append(f"Face lighting is too dark (brightness: {mean_brightness:.1f}/255, min: 45.0). Please face a light source.")
-        elif mean_brightness > 220.0:
-            issues.append(f"Face lighting is overexposed (brightness: {mean_brightness:.1f}/255, max: 220.0). Please reduce direct glare.")
+        if mean_brightness < config.REF_MIN_BRIGHTNESS:
+            issues.append(f"Face lighting is too dark (brightness: {mean_brightness:.1f}/255, min: {config.REF_MIN_BRIGHTNESS}). Please face a light source.")
+        elif mean_brightness > config.REF_MAX_BRIGHTNESS:
+            issues.append(f"Face lighting is overexposed (brightness: {mean_brightness:.1f}/255, max: {config.REF_MAX_BRIGHTNESS}). Please reduce direct glare.")
 
         # Compute composite quality score (0 - 100)
-        sharpness_score = min(60.0, (laplacian_var / 120.0) * 60.0)
+        sharpness_score = min(60.0, (laplacian_var / 120) * 60.0)
         brightness_score = 40.0 - abs(mean_brightness - 128.0) * (40.0 / 128.0)
         quality_score = max(5.0, min(100.0, round(sharpness_score + brightness_score, 1)))
 
         return quality_score, issues
 
     @staticmethod
-    def create_thumbnail_base64(image: np.ndarray, max_dim: int = 240, quality: int = 65) -> str:
+    def create_thumbnail_base64(image: np.ndarray, max_dim: int = config.THUMBNAIL_MAX_DIM, quality: int = config.THUMBNAIL_QUALITY) -> str:
         """
         Resize image preserving aspect ratio and encode to base64 JPEG data URL
         for lightweight evidence/proof storage in PostgreSQL.
@@ -301,7 +302,7 @@ class VisionEngine:
         # Right eye: top lid 386, bottom lid 374, outer corner 263, inner corner 362
         right_open = cls.eye_openness(pts, 386, 374, 263, 362)
         avg_openness = float((left_open + right_open) / 2.0)
-        eyes_open = avg_openness >= EYES_OPEN_MIN
+        eyes_open = avg_openness >= config.EYES_OPEN_MIN
 
         # Horizontal ratio (Left eye: 33 outer, 133 inner, 468 iris; Right eye: 362 inner, 263 outer, 473 iris)
         left_outer = pts[33].x
@@ -388,24 +389,24 @@ class VisionEngine:
         #
         # In the unmirrored raw camera feed:
         # - Turning/looking towards USER'S LEFT:
-        #     * Head yaw rotates negative in SolvePnP: delta_yaw < -20.0°
-        #     * Irises shift toward camera-right (+X in image): delta_iris_h > 0.15
+        #     * Head yaw rotates negative in SolvePnP: delta_yaw < -config.GAZE_YAW_AWAY_DEG
+        #     * Irises shift toward camera-right (+X in image): delta_iris_h > config.GAZE_IRIS_H_AWAY
         # - Turning/looking towards USER'S RIGHT:
-        #     * Head yaw rotates positive in SolvePnP: delta_yaw > 20.0°
-        #     * Irises shift toward camera-left (-X in image): delta_iris_h < -0.15
-        if delta_yaw < -20.0 or delta_iris_h > 0.15:
+        #     * Head yaw rotates positive in SolvePnP: delta_yaw > config.GAZE_YAW_AWAY_DEG
+        #     * Irises shift toward camera-left (-X in image): delta_iris_h < -config.GAZE_IRIS_H_AWAY
+        if delta_yaw < -config.GAZE_YAW_AWAY_DEG or delta_iris_h > config.GAZE_IRIS_H_AWAY:
             direction = "LOOKING_LEFT"
             is_looking_away = True
-        elif delta_yaw > 20.0 or delta_iris_h < -0.15:
+        elif delta_yaw > config.GAZE_YAW_AWAY_DEG or delta_iris_h < -config.GAZE_IRIS_H_AWAY:
             direction = "LOOKING_RIGHT"
             is_looking_away = True
         # Vertical check:
         # Looking down: head nods down (delta_pitch > 0 in SolvePnP) or irises shift down (+Y, delta_iris_v > 0)
         # Looking up: head tilts up (delta_pitch < 0 in SolvePnP) or irises shift up (-Y, delta_iris_v < 0)
-        elif delta_pitch > 15.0 or (delta_pitch > 8.0 and delta_iris_v > 0.16):
+        elif delta_pitch > config.GAZE_PITCH_DOWN_DEG or (delta_pitch > config.GAZE_PITCH_DOWN_SOFT_DEG and delta_iris_v > config.GAZE_IRIS_V_DOWN):
             direction = "LOOKING_DOWN"
             is_looking_away = True
-        elif delta_pitch < -18.0 or (delta_pitch < -10.0 and delta_iris_v < -0.16):
+        elif delta_pitch < -config.GAZE_PITCH_UP_DEG or (delta_pitch < -config.GAZE_PITCH_UP_SOFT_DEG and delta_iris_v < -config.GAZE_IRIS_V_UP):
             direction = "LOOKING_UP"
             is_looking_away = True
 
@@ -469,11 +470,11 @@ class VisionEngine:
             else:
                 landmarks = mesh_results.multi_face_landmarks[0]
                 pitch, yaw, _ = self.estimate_head_pose(landmarks, w, h)
-                if abs(yaw) > 15.0 or abs(pitch) > 15.0:
-                    issues.append(f"Face is turned away (yaw: {yaw:.1f}°, pitch: {pitch:.1f}°, maximum ±15°). Please look straight at the camera.")
+                if abs(yaw) > config.REF_MAX_POSE_DEG or abs(pitch) > config.REF_MAX_POSE_DEG:
+                    issues.append(f"Face is turned away (yaw: {yaw:.1f}°, pitch: {pitch:.1f}°, maximum ±{config.REF_MAX_POSE_DEG}°). Please look straight at the camera.")
                 _, _, openness, eyes_open = self.estimate_iris_gaze(landmarks, w, h)
                 if not eyes_open:
-                    issues.append(f"Eyes appear closed or blinking (openness: {openness:.2f}, min: {EYES_OPEN_MIN}). Please keep eyes open.")
+                    issues.append(f"Eyes appear closed or blinking (openness: {openness:.2f}, min: {config.EYES_OPEN_MIN}). Please keep eyes open.")
 
             # Strict quality gate: reject reference photo if any blocking issue is detected
             if len(issues) > 0:
@@ -596,13 +597,13 @@ class VisionEngine:
             yaw = gaze_res.get("yaw", 0.0)
             pitch = gaze_res.get("pitch", 0.0)
 
-            # Verification threshold: similarity >= 0.363 indicates same face identity
-            # Extreme head angles (>35° yaw or pitch) degrade facial recognition accuracy;
+            # Verification threshold: similarity >= config.SFACE_MATCH_THRESHOLD indicates same face identity
+            # Extreme head angles (> config.UNCERTAIN_POSE_DEG yaw or pitch) degrade facial recognition accuracy;
             # mark as UNKNOWN rather than NO_MATCH to prevent false alarms.
-            is_match = similarity >= SFACE_MATCH_THRESHOLD
+            is_match = similarity >= config.SFACE_MATCH_THRESHOLD
             if is_match:
                 verification_status = "MATCH"
-            elif (yaw is not None and abs(yaw) > 35.0) or (pitch is not None and abs(pitch) > 35.0):
+            elif (yaw is not None and abs(yaw) > config.UNCERTAIN_POSE_DEG) or (pitch is not None and abs(pitch) > config.UNCERTAIN_POSE_DEG):
                 verification_status = "UNKNOWN"
             else:
                 verification_status = "NO_MATCH"

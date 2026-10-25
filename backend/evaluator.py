@@ -8,6 +8,7 @@ Separates extraction from evaluation:
 
 from typing import List, Dict, Any, Tuple, Optional
 import numpy as np
+import config
 
 
 class IntervalTracker:
@@ -20,10 +21,10 @@ class IntervalTracker:
     def __init__(
         self,
         interval_type: str = "looking_away",
-        open_after: int = 5,
-        close_after: int = 3,
-        max_gap_s: float = 1.0,
-        period_s: float = 0.2
+        open_after: int = config.GAZE_OPEN_AFTER,
+        close_after: int = config.GAZE_CLOSE_AFTER,
+        max_gap_s: float = config.MAX_UNKNOWN_GAP_S,
+        period_s: float = config.FRAME_PERIOD_S
     ):
         self.interval_type = interval_type
         self.open_after = open_after
@@ -123,12 +124,12 @@ def evaluate_face_verdict(metrics: Dict[str, Any]) -> Tuple[str, List[str]]:
     Independent Face Assessment (H2):
     FAIL conditions:
       - valid_frames == 0 -> no_data
-      - different_person_s >= 2.0 -> different_person
-      - multiple_faces_s >= 5.0 -> multiple_faces
-      - no_face_pct > 30.0 -> no_face
+      - different_person_s >= FACE_DIFFERENT_PERSON_FAIL_S -> different_person
+      - multiple_faces_s >= FACE_MULTIPLE_FACES_FAIL_S -> multiple_faces
+      - no_face_pct > FACE_NO_FACE_FAIL_PCT -> no_face
     REVIEW conditions:
-      - no_face_pct > 15.0 -> no_face
-      - identity_unknown_pct > 25.0 -> identity_unknown
+      - no_face_pct > FACE_NO_FACE_REVIEW_PCT -> no_face
+      - identity_unknown_pct > FACE_IDENTITY_UNKNOWN_REVIEW_PCT -> identity_unknown
       - static_face -> static_face_detected
     PASS otherwise.
     """
@@ -138,27 +139,27 @@ def evaluate_face_verdict(metrics: Dict[str, Any]) -> Tuple[str, List[str]]:
     if metrics.get("valid_frames", 0) == 0:
         return "FAIL", ["no_data"]
 
-    if metrics.get("different_person_s", 0.0) >= 2.0:
+    if metrics.get("different_person_s", 0.0) >= config.FACE_DIFFERENT_PERSON_FAIL_S:
         reasons.append("different_person")
         if not first_verdict:
             first_verdict = "FAIL"
 
-    if metrics.get("multiple_faces_s", 0.0) >= 5.0:
+    if metrics.get("multiple_faces_s", 0.0) >= config.FACE_MULTIPLE_FACES_FAIL_S:
         reasons.append("multiple_faces")
         if not first_verdict:
             first_verdict = "FAIL"
 
     no_face_pct = metrics.get("no_face_pct", 0.0)
-    if no_face_pct > 30.0:
+    if no_face_pct > config.FACE_NO_FACE_FAIL_PCT:
         reasons.append("no_face")
         if not first_verdict:
             first_verdict = "FAIL"
-    elif no_face_pct > 15.0:
+    elif no_face_pct > config.FACE_NO_FACE_REVIEW_PCT:
         reasons.append("no_face")
         if not first_verdict:
             first_verdict = "REVIEW"
 
-    if metrics.get("identity_unknown_pct", 0.0) > 25.0:
+    if metrics.get("identity_unknown_pct", 0.0) > config.FACE_IDENTITY_UNKNOWN_REVIEW_PCT:
         reasons.append("identity_unknown")
         if not first_verdict:
             first_verdict = "REVIEW"
@@ -179,12 +180,12 @@ def evaluate_gaze_verdict(metrics: Dict[str, Any]) -> Tuple[str, List[str]]:
     Independent Gaze Assessment (H2, M4):
     FAIL conditions:
       - long_away_intervals > 0 -> long_away_intervals
-      - away_pct > 35.0 -> looking_away
+      - away_pct > GAZE_AWAY_FAIL_PCT -> looking_away
     REVIEW conditions:
       - bad_baseline -> no_stable_baseline
       - gaze_valid_frames == 0 -> no_data
-      - away_pct > 20.0 -> looking_away
-      - gaze_unknown_pct > 25.0 -> gaze_unknown
+      - away_pct > GAZE_AWAY_REVIEW_PCT -> looking_away
+      - gaze_unknown_pct > GAZE_UNKNOWN_REVIEW_PCT -> gaze_unknown
     PASS otherwise.
     """
     reasons = []
@@ -204,16 +205,16 @@ def evaluate_gaze_verdict(metrics: Dict[str, Any]) -> Tuple[str, List[str]]:
             first_verdict = "FAIL"
 
     away_pct = metrics.get("away_pct", 0.0)
-    if away_pct > 35.0:
+    if away_pct > config.GAZE_AWAY_FAIL_PCT:
         reasons.append("looking_away")
         if not first_verdict or first_verdict == "REVIEW":
             first_verdict = "FAIL"
-    elif away_pct > 20.0:
+    elif away_pct > config.GAZE_AWAY_REVIEW_PCT:
         reasons.append("looking_away")
         if not first_verdict:
             first_verdict = "REVIEW"
 
-    if metrics.get("gaze_unknown_pct", 0.0) > 25.0:
+    if metrics.get("gaze_unknown_pct", 0.0) > config.GAZE_UNKNOWN_REVIEW_PCT:
         reasons.append("gaze_unknown")
         if not first_verdict:
             first_verdict = "REVIEW"
@@ -239,9 +240,9 @@ def evaluate_session_records(
         if total > 0 and "t_s" in records[-1]:
             duration_seconds = max(1.0, round(records[-1]["t_s"], 2))
         else:
-            duration_seconds = max(1.0, round(total * 0.2, 2))
+            duration_seconds = max(1.0, round(total * config.FRAME_PERIOD_S, 2))
 
-    fps = total / duration_seconds if duration_seconds > 0 else 5.0
+    fps = total / duration_seconds if duration_seconds > 0 else round(1.0 / config.FRAME_PERIOD_S, 1)
 
     # 1. Compute per-subject baseline (first 50 on-screen frames with single face & eyes open)
     baseline_samples = []
@@ -267,24 +268,24 @@ def evaluate_session_records(
         pitch_vals = [s["pitch"] for s in baseline_samples]
         yaw_std = float(np.std(yaw_vals))
         pitch_std = float(np.std(pitch_vals))
-        if yaw_std > 8.0 or pitch_std > 8.0:
+        if yaw_std > config.CALIBRATION_MAX_STD_DEG or pitch_std > config.CALIBRATION_MAX_STD_DEG:
             bad_baseline = True
     elif total >= 50:
         bad_baseline = True
 
     # Post-calibration check (M4): if >50% of first 30 frames after calibration are looking away
     if not bad_baseline:
-        post_calib_records = records[len(baseline_samples):len(baseline_samples) + 30]
-        if len(post_calib_records) >= 15:
+        post_calib_records = records[len(baseline_samples):len(baseline_samples) + config.POST_CALIBRATION_CHECK_FRAMES]
+        if len(post_calib_records) >= config.POST_CALIBRATION_MIN_FRAMES:
             post_away = sum(1 for r in post_calib_records if r.get("is_looking_away") is True)
-            if (post_away / len(post_calib_records)) > 0.5:
+            if (post_away / len(post_calib_records)) > config.POST_CALIBRATION_AWAY_RATIO:
                 bad_baseline = True
 
     # 2. Track Intervals across all anomaly types (L7)
-    gaze_tracker = IntervalTracker("looking_away", open_after=5, close_after=3, period_s=round(1.0 / fps, 3))
-    diff_person_tracker = IntervalTracker("different_person", open_after=3, close_after=2, period_s=round(1.0 / fps, 3))
-    multi_face_tracker = IntervalTracker("multiple_faces", open_after=3, close_after=2, period_s=round(1.0 / fps, 3))
-    no_face_tracker = IntervalTracker("no_face", open_after=3, close_after=2, period_s=round(1.0 / fps, 3))
+    gaze_tracker = IntervalTracker("looking_away", open_after=config.GAZE_OPEN_AFTER, close_after=config.GAZE_CLOSE_AFTER, max_gap_s=config.MAX_UNKNOWN_GAP_S, period_s=round(1.0 / fps, 3))
+    diff_person_tracker = IntervalTracker("different_person", open_after=config.IDENTITY_OPEN_AFTER, close_after=config.IDENTITY_CLOSE_AFTER, max_gap_s=config.MAX_UNKNOWN_GAP_S, period_s=round(1.0 / fps, 3))
+    multi_face_tracker = IntervalTracker("multiple_faces", open_after=config.IDENTITY_OPEN_AFTER, close_after=config.IDENTITY_CLOSE_AFTER, max_gap_s=config.MAX_UNKNOWN_GAP_S, period_s=round(1.0 / fps, 3))
+    no_face_tracker = IntervalTracker("no_face", open_after=config.IDENTITY_OPEN_AFTER, close_after=config.IDENTITY_CLOSE_AFTER, max_gap_s=config.MAX_UNKNOWN_GAP_S, period_s=round(1.0 / fps, 3))
 
     matched_frames = 0
     unmatched_frames = 0
@@ -377,13 +378,13 @@ def evaluate_session_records(
 
     # Check static face heuristic (M8)
     static_face_detected = False
-    if duration_seconds >= 30.0:
-        if len(recent_poses) >= 100:
-            sample_poses = recent_poses[-150:]
+    if duration_seconds >= config.STATIC_FACE_MIN_DURATION_S:
+        if len(recent_poses) >= config.STATIC_FACE_MIN_POSES:
+            sample_poses = recent_poses[-config.STATIC_FACE_WINDOW:]
             y_arr = [p[0] for p in sample_poses]
             p_arr = [p[1] for p in sample_poses]
             pose_std = (float(np.std(y_arr)) + float(np.std(p_arr))) / 2.0
-            if blink_count == 0 and pose_std < 0.6:
+            if blink_count == 0 and pose_std < config.STATIC_FACE_MAX_POSE_STD:
                 static_face_detected = True
 
     # 3. Calculate metrics
@@ -401,7 +402,7 @@ def evaluate_session_records(
 
     long_away_intervals = sum(
         1 for iv in gaze_tracker.intervals
-        if iv.get("duration_s", 0.0) >= 10.0
+        if iv.get("duration_s", 0.0) >= config.GAZE_LONG_AWAY_S
     )
 
     single_face_frames = center_gaze_frames + looking_away_frames + gaze_unknown_frames

@@ -16,6 +16,7 @@ from evaluator import (
     evaluate_gaze_verdict,
     evaluate_session_records,
 )
+import config
 try:
     from db_models import (
         init_db,
@@ -67,7 +68,7 @@ class SessionDatabase:
                 "looking_away_frames": 0,
                 "center_gaze_frames": 0,
                 "gaze_unknown_frames": 0,
-                "gaze_tracker": IntervalTracker("looking_away", open_after=5, close_after=3, max_gap_s=1.0, period_s=0.2),
+                "gaze_tracker": IntervalTracker("looking_away", open_after=config.GAZE_OPEN_AFTER, close_after=config.GAZE_CLOSE_AFTER, max_gap_s=config.MAX_UNKNOWN_GAP_S, period_s=config.FRAME_PERIOD_S),
                 "consecutive_no_match": 0,
                 "consecutive_multiple_faces": 0,
                 "consecutive_no_face": 0,
@@ -127,7 +128,7 @@ class SessionDatabase:
             sess["looking_away_frames"] = 0
             sess["center_gaze_frames"] = 0
             sess["gaze_unknown_frames"] = 0
-            sess["gaze_tracker"] = IntervalTracker(open_after=5, close_after=3, max_gap_s=1.0, period_s=0.2)
+            sess["gaze_tracker"] = IntervalTracker(open_after=config.GAZE_OPEN_AFTER, close_after=config.GAZE_CLOSE_AFTER, max_gap_s=config.MAX_UNKNOWN_GAP_S, period_s=config.FRAME_PERIOD_S)
             sess["baseline_samples"] = []
             sess["baseline"] = None
             sess["post_calib_total"] = 0
@@ -160,7 +161,7 @@ class SessionDatabase:
             start_t = sess.get("start_time") or now
             elapsed = now - start_t
             idx = len(sess.get("records", []))
-            t_s = round(elapsed if elapsed >= (idx * 0.1) else idx * 0.2, 3)
+            t_s = round(elapsed if elapsed >= (idx * (config.FRAME_PERIOD_S / 2)) else idx * config.FRAME_PERIOD_S, 3)
             t_ms = int(t_s * 1000)
 
             rec = {
@@ -236,9 +237,9 @@ class SessionDatabase:
                             result.get("iris_h", 0.5),
                             result.get("iris_v", 0.5)
                         ))
-                        if len(sess["trailing_on_screen_samples"]) > 100:
+                        if len(sess["trailing_on_screen_samples"]) > config.TRAILING_BASELINE_WINDOW:
                             sess["trailing_on_screen_samples"].pop(0)
-                        if len(sess["trailing_on_screen_samples"]) == 100:
+                        if len(sess["trailing_on_screen_samples"]) == config.TRAILING_BASELINE_WINDOW:
                             import statistics
                             yaws = [s[0] for s in sess["trailing_on_screen_samples"]]
                             pitches = [s[1] for s in sess["trailing_on_screen_samples"]]
@@ -300,7 +301,7 @@ class SessionDatabase:
                 sess["consecutive_match"] = 0
                 sess["consecutive_multiple_faces"] = 0
                 sess["consecutive_no_face"] = 0
-                if sess["consecutive_no_match"] >= 3 and sess["active_identity_alert"] != "NO_MATCH":
+                if sess["consecutive_no_match"] >= config.IDENTITY_OPEN_AFTER and sess["active_identity_alert"] != "NO_MATCH":
                     sess["active_identity_alert"] = "NO_MATCH"
                     self._internal_add_event(sess, "IDENTITY_MISMATCH", {
                         "message": f"Face does not match reference identity (similarity: {result.get('similarity')})."
@@ -322,7 +323,7 @@ class SessionDatabase:
                 sess["consecutive_match"] = 0
                 sess["consecutive_no_match"] = 0
                 sess["consecutive_no_face"] = 0
-                if sess["consecutive_multiple_faces"] >= 3 and sess["active_identity_alert"] != "MULTIPLE_FACES":
+                if sess["consecutive_multiple_faces"] >= config.IDENTITY_OPEN_AFTER and sess["active_identity_alert"] != "MULTIPLE_FACES":
                     sess["active_identity_alert"] = "MULTIPLE_FACES"
                     self._internal_add_event(sess, "MULTIPLE_FACES", {
                         "message": f"Second face detected in camera view ({result.get('faces_detected')} faces visible)."
@@ -343,7 +344,7 @@ class SessionDatabase:
                 sess["consecutive_match"] = 0
                 sess["consecutive_no_match"] = 0
                 sess["consecutive_multiple_faces"] = 0
-                if sess["consecutive_no_face"] >= 3 and sess["active_identity_alert"] != "NO_FACE":
+                if sess["consecutive_no_face"] >= config.IDENTITY_OPEN_AFTER and sess["active_identity_alert"] != "NO_FACE":
                     sess["active_identity_alert"] = "NO_FACE"
                     self._internal_add_event(sess, "FACE_LOST", {
                         "message": "User face disappeared from camera view."
@@ -364,7 +365,7 @@ class SessionDatabase:
                 sess["consecutive_no_match"] = 0
                 sess["consecutive_multiple_faces"] = 0
                 sess["consecutive_no_face"] = 0
-                if sess["consecutive_match"] >= 3 and sess["active_identity_alert"] is not None:
+                if sess["consecutive_match"] >= config.IDENTITY_OPEN_AFTER and sess["active_identity_alert"] is not None:
                     self._internal_add_event(sess, "FACE_RESTORED", {
                         "message": "Verified user face re-established in camera view."
                     })
@@ -377,16 +378,16 @@ class SessionDatabase:
 
             # Liveness / static photo detection (M8 cheap signal)
             # Living humans blink 15-20 times per minute and exhibit involuntary micro-movements
-            if result.get("eyes_open") is False or (result.get("openness") is not None and result["openness"] < 0.18):
+            if result.get("eyes_open") is False or (result.get("openness") is not None and result["openness"] < config.EYES_OPEN_MIN):
                 sess["blink_count"] += 1
 
             if status == "MATCH" and result.get("gaze_yaw") is not None and result.get("gaze_pitch") is not None:
                 sess["recent_poses"].append((result["gaze_yaw"], result["gaze_pitch"]))
-                if len(sess["recent_poses"]) > 150:
+                if len(sess["recent_poses"]) > config.STATIC_FACE_WINDOW:
                     sess["recent_poses"].pop(0)
 
                 # After sustained matching (~30s, 150 frames) with 0 blinks and near-zero pose variance
-                if sess["matched_frames"] >= 150 and len(sess["recent_poses"]) >= 100 and sess["blink_count"] == 0:
+                if sess["matched_frames"] >= config.STATIC_FACE_WINDOW and len(sess["recent_poses"]) >= config.STATIC_FACE_MIN_POSES and sess["blink_count"] == 0:
                     yaws = [p[0] for p in sess["recent_poses"]]
                     pitches = [p[1] for p in sess["recent_poses"]]
                     mean_yaw = sum(yaws) / len(yaws)
@@ -459,7 +460,7 @@ class SessionDatabase:
                     "face": {"verdict": "FAIL", "reasons": ["no_data"]},
                     "gaze": {"verdict": "REVIEW", "reasons": ["no_data"]},
                     "metrics": {
-                        "valid_frames": 0, "fps": 5.0, "different_person_s": 0.0,
+                        "valid_frames": 0, "fps": round(1.0 / config.FRAME_PERIOD_S, 1), "different_person_s": 0.0,
                         "multiple_faces_s": 0.0, "no_face_s": 0.0, "no_face_pct": 0.0,
                         "identity_unknown_s": 0.0, "identity_unknown_pct": 0.0,
                         "gaze_valid_frames": 0, "away_s": 0.0, "away_pct": 0.0,
@@ -484,7 +485,7 @@ class SessionDatabase:
 
         return summary
 
-    def cleanup_old_sessions(self, max_age_seconds: int = 3600):
+    def cleanup_old_sessions(self, max_age_seconds: int = config.SESSION_MAX_AGE_S):
         """Remove sessions older than max_age_seconds (L5)."""
         now = time.time()
         with self._lock:
