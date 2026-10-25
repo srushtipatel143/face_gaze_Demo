@@ -15,7 +15,9 @@ from evaluator import (
     evaluate_session_records,
     evaluate_face_verdict,
     evaluate_gaze_verdict,
+    evaluate,
 )
+from records import FrameRecord, MATCH, NO_MATCH
 
 
 def test_interval_tracker_away_then_center():
@@ -296,4 +298,150 @@ def test_static_face_heuristic_triggers_review():
     assert summary["metrics"]["static_face"] is True
     assert summary["face"]["verdict"] == "REVIEW"
     assert "static_face_detected" in summary["face"]["reasons"]
+
+
+def test_scattered_no_match_does_not_fail():
+    """Scattered single no-match frames don't open intervals and don't fail identity."""
+    records = []
+    for i in range(50):
+        ident = NO_MATCH if i % 10 == 0 else MATCH
+        records.append(FrameRecord(
+            t_s=round(i * 0.2, 2), faces_detected=1, identity=ident, similarity=0.2 if ident == NO_MATCH else 0.8,
+            yaw=0.0, pitch=0.0, iris_h=0.5, iris_v=0.5, eyes_open=True,
+            gaze_direction="CENTER", is_looking_away=False, calibrating=False
+        ))
+    rep = evaluate(records, duration_s=10.0, calibration={"completed": True, "unstable": False})
+    assert rep["face"]["verdict"] == "PASS"
+    assert rep["metrics"]["different_person_s"] == 0.0
+
+
+def test_calibration_frames_excluded():
+    """Calibration frames are excluded from gaze statistics and away intervals."""
+    records = []
+    for i in range(25):
+        records.append(FrameRecord(
+            t_s=round(i * 0.2, 2), faces_detected=1, identity=MATCH, similarity=0.9,
+            yaw=-25.0, pitch=0.0, iris_h=0.7, iris_v=0.5, eyes_open=True,
+            gaze_direction="LOOKING_LEFT", is_looking_away=True, calibrating=True
+        ))
+    for i in range(25, 50):
+        records.append(FrameRecord(
+            t_s=round(i * 0.2, 2), faces_detected=1, identity=MATCH, similarity=0.9,
+            yaw=0.0, pitch=0.0, iris_h=0.5, iris_v=0.5, eyes_open=True,
+            gaze_direction="CENTER", is_looking_away=False, calibrating=False
+        ))
+    rep = evaluate(records, duration_s=10.0, calibration={"completed": True, "unstable": False})
+    assert rep["metrics"]["gaze_valid_frames"] == 25
+    assert rep["metrics"]["away_s"] == 0.0
+    assert rep["metrics"]["away_pct"] == 0.0
+    assert rep["gaze"]["verdict"] == "PASS"
+
+
+def test_away_pct_matches_intervals():
+    """metrics.away_s equals sum of looking_away interval duration_s and away_pct matches."""
+    records = []
+    for i in range(20):
+        records.append(FrameRecord(
+            t_s=round(i * 0.2, 2), faces_detected=1, identity=MATCH, similarity=0.9,
+            yaw=0.0, pitch=0.0, iris_h=0.5, iris_v=0.5, eyes_open=True,
+            gaze_direction="CENTER", is_looking_away=False, calibrating=False
+        ))
+    for i in range(20, 35):
+        records.append(FrameRecord(
+            t_s=round(i * 0.2, 2), faces_detected=1, identity=MATCH, similarity=0.9,
+            yaw=-25.0, pitch=0.0, iris_h=0.7, iris_v=0.5, eyes_open=True,
+            gaze_direction="LOOKING_LEFT", is_looking_away=True, calibrating=False
+        ))
+    for i in range(35, 50):
+        records.append(FrameRecord(
+            t_s=round(i * 0.2, 2), faces_detected=1, identity=MATCH, similarity=0.9,
+            yaw=0.0, pitch=0.0, iris_h=0.5, iris_v=0.5, eyes_open=True,
+            gaze_direction="CENTER", is_looking_away=False, calibrating=False
+        ))
+    rep = evaluate(records, duration_s=10.0, calibration={"completed": True, "unstable": False})
+    away_intervals = [iv for iv in rep["intervals"] if iv["type"] == "looking_away"]
+    assert len(away_intervals) == 1
+    sum_dur = sum(iv["duration_s"] for iv in away_intervals)
+    assert rep["metrics"]["away_s"] == sum_dur
+    expected_pct = min(100.0, sum_dur / rep["metrics"]["gaze_valid_s"] * 100.0)
+    assert rep["metrics"]["away_pct"] == round(expected_pct, 1)
+
+
+def test_direction_breakdown():
+    """away_by_direction_s contains all 4 directions and sums durations by direction."""
+    records = []
+    t = 0.0
+    for _ in range(10):
+        records.append(FrameRecord(t_s=round(t, 2), faces_detected=1, identity=MATCH, similarity=0.9,
+                                   yaw=0.0, pitch=0.0, iris_h=0.5, iris_v=0.5, eyes_open=True,
+                                   gaze_direction="CENTER", is_looking_away=False, calibrating=False))
+        t += 0.2
+    for _ in range(8):
+        records.append(FrameRecord(t_s=round(t, 2), faces_detected=1, identity=MATCH, similarity=0.9,
+                                   yaw=-25.0, pitch=0.0, iris_h=0.7, iris_v=0.5, eyes_open=True,
+                                   gaze_direction="LOOKING_LEFT", is_looking_away=True, calibrating=False))
+        t += 0.2
+    for _ in range(5):
+        records.append(FrameRecord(t_s=round(t, 2), faces_detected=1, identity=MATCH, similarity=0.9,
+                                   yaw=0.0, pitch=0.0, iris_h=0.5, iris_v=0.5, eyes_open=True,
+                                   gaze_direction="CENTER", is_looking_away=False, calibrating=False))
+        t += 0.2
+    for _ in range(8):
+        records.append(FrameRecord(t_s=round(t, 2), faces_detected=1, identity=MATCH, similarity=0.9,
+                                   yaw=0.0, pitch=25.0, iris_h=0.5, iris_v=0.3, eyes_open=True,
+                                   gaze_direction="LOOKING_UP", is_looking_away=True, calibrating=False))
+        t += 0.2
+    for _ in range(5):
+        records.append(FrameRecord(t_s=round(t, 2), faces_detected=1, identity=MATCH, similarity=0.9,
+                                   yaw=0.0, pitch=0.0, iris_h=0.5, iris_v=0.5, eyes_open=True,
+                                   gaze_direction="CENTER", is_looking_away=False, calibrating=False))
+        t += 0.2
+
+    rep = evaluate(records, duration_s=t, calibration={"completed": True, "unstable": False})
+    d = rep["metrics"]["away_by_direction_s"]
+    assert set(d.keys()) == {"LEFT", "RIGHT", "UP", "DOWN"}
+    assert d["LEFT"] > 0.0
+    assert d["UP"] > 0.0
+    assert d["RIGHT"] == 0.0
+    assert d["DOWN"] == 0.0
+    assert round(d["LEFT"] + d["UP"], 2) == rep["metrics"]["away_s"]
+
+
+def test_zero_frames_review():
+    """Zero frames session results in REVIEW with no_data for face and gaze, and overall SUSPICIOUS."""
+    rep = evaluate([], duration_s=0.0, calibration={"completed": False, "unstable": False})
+    assert rep["total_frames"] == 0
+    assert rep["face"]["verdict"] == "REVIEW"
+    assert rep["face"]["reasons"] == ["no_data"]
+    assert rep["gaze"]["verdict"] == "REVIEW"
+    assert rep["gaze"]["reasons"] == ["no_data"]
+    assert rep["overall_verdict"] == "SUSPICIOUS"
+
+
+def test_clean_30s_session_passes():
+    """A 30-second clean live session gives Identity PASS and Attention PASS."""
+    records = []
+    # 25 frames calibrating
+    for i in range(25):
+        records.append(FrameRecord(
+            t_s=round(i * 0.2, 2), faces_detected=1, identity=MATCH, similarity=0.92,
+            yaw=0.5, pitch=0.5, iris_h=0.5, iris_v=0.5, eyes_open=True,
+            gaze_direction="CENTER", is_looking_away=False, calibrating=True
+        ))
+    # 125 frames (25s) active on-screen with blinks
+    for i in range(25, 150):
+        # A blink every 30 frames
+        eyes = False if (i % 30 == 0) else True
+        records.append(FrameRecord(
+            t_s=round(i * 0.2, 2), faces_detected=1, identity=MATCH, similarity=0.92,
+            yaw=0.5, pitch=0.5, iris_h=0.5, iris_v=0.5, eyes_open=eyes,
+            gaze_direction="CENTER", is_looking_away=False if eyes else None, calibrating=False
+        ))
+    rep = evaluate(records, duration_s=30.0, calibration={"completed": True, "unstable": False})
+    assert rep["face"]["verdict"] == "PASS"
+    assert rep["face"]["reasons"] == []
+    assert rep["gaze"]["verdict"] == "PASS"
+    assert rep["gaze"]["reasons"] == []
+    assert rep["overall_verdict"] == "PASSED"
+
 

@@ -25,7 +25,7 @@ from db_models import (
     save_reference_session,
     save_session_results,
 )
-from evaluator import evaluate_session_records
+from evaluator import evaluate
 from models.schemas import (
     BoundingBox,
     FrameVerificationRequest,
@@ -34,7 +34,7 @@ from models.schemas import (
     LiveStatus,
     ReferencePhotoRequest,
     ReferenceResponse,
-    SessionSummaryResponse,
+    SessionReport,
     VerificationStartRequest,
     VerificationStartResponse,
     VerificationStopRequest,
@@ -225,23 +225,22 @@ def analyze_live_frame(req: FrameVerificationRequest):
 # ---------------------------------------------------------------------------
 # Phase 5: Stop Verification & Final Audit Summary
 # ---------------------------------------------------------------------------
-@app.post("/api/verification/stop", response_model=SessionSummaryResponse)
+@app.post("/api/verification/stop", response_model=SessionReport)
 def stop_live_verification(req: VerificationStopRequest):
     with session_errors():
+        session = store.get(req.session_id)
+    if session.status == "completed" and session.report:
+        return session.report                      # idempotent: second /stop returns same report
+    with session_errors():
         data = store.stop(req.session_id)
-
-    records_for_eval = [dict(r.to_dict(), verification_status=r.identity) for r in data.records]
-    summary = evaluate_session_records(records_for_eval, duration_seconds=data.duration_s)
-    summary["session_id"] = req.session_id
-    summary["status"] = "completed"
-    store.set_report(req.session_id, summary)
-
+    report = evaluate(data.records, data.duration_s, data.calibration)
+    report["session_id"] = req.session_id
+    store.set_report(req.session_id, report)
     try:
-        save_session_results(req.session_id, summary)
+        save_session_results(req.session_id, report)
     except Exception:
         pass
-
-    return SessionSummaryResponse(**summary)
+    return report
 
 
 @app.get("/api/session/{session_id}")

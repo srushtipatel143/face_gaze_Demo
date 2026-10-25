@@ -1,5 +1,5 @@
 from typing import Optional, List, Dict, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 class ReferencePhotoRequest(BaseModel):
     image: str = Field(..., description="Base64 encoded JPEG/PNG image data or data URL")
@@ -69,48 +69,21 @@ class FrameVerificationResponse(BaseModel):
 class VerificationStopRequest(BaseModel):
     session_id: str
 
-class GazeEvent(BaseModel):
-    id: Optional[str] = None
-    timestamp: float
-    type: str
-    message: Optional[str] = None
-    details: Optional[Dict[str, Any]] = Field(default_factory=dict)
-
 class VerdictDetail(BaseModel):
     verdict: str  # "PASS", "FAIL", "REVIEW"
     reasons: List[str] = Field(default_factory=list)
 
-class SessionMetrics(BaseModel):
-    valid_frames: int
-    fps: float
-    different_person_s: float
-    multiple_faces_s: float
-    no_face_s: float
-    no_face_pct: float
-    identity_unknown_s: float
-    identity_unknown_pct: float
-    gaze_valid_frames: int
-    away_s: float
-    away_pct: float
-    long_away_intervals: int
-    gaze_unknown_pct: float
-    bad_baseline: Optional[bool] = False
-    static_face: Optional[bool] = False
 
-class SessionSummaryResponse(BaseModel):
+class SessionReport(BaseModel):
+    model_config = ConfigDict(extra="allow")     # legacy keys pass through
     session_id: str
     status: str
-    duration_seconds: float
+    rules_version: str
+    duration_s: float
     total_frames: int
-    matched_frames: int
-    unmatched_frames: int
-    no_face_frames: int
-    multiple_faces_frames: int
-    match_percentage: float
-    looking_away_percentage: float
     face: VerdictDetail
     gaze: VerdictDetail
-    metrics: SessionMetrics
-    overall_verdict: Optional[str] = None  # Kept for backward compatibility
-    events: List[GazeEvent]
-    intervals: List[Dict[str, Any]] = []
+    overall_verdict: str
+    metrics: Dict[str, Any]
+    intervals: List[Dict[str, Any]]
+
