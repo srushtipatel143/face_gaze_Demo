@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { Plus, History, WifiOff } from 'lucide-react';
 import CameraCapture from './components/CameraCapture';
 import LiveVerification from './components/LiveVerification';
-import SessionResults from './components/SessionResults';
+import SessionReport from './components/SessionReport';
 import { Button, Card, Stepper, Alert } from './components/ui';
 import { API_BASE } from './config';
 import './App.css';
@@ -128,10 +128,11 @@ export default function App() {
         )}
 
         {view === 'report' && (
-          <SessionResults
-            summary={report}
-            referencePhoto={reference?.photo}
+          <SessionReport
+            report={report}
+            reportSource={reportSource}
             onNewSession={handleNewSession}
+            onBackToHistory={() => setView('history')}
           />
         )}
 

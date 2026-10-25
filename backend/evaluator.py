@@ -235,16 +235,6 @@ def _report(records: List[FrameRecord], intervals: List[Dict[str, Any]],
         "overall_verdict": _overall_verdict(face["verdict"], gaze["verdict"]),
         "metrics": metrics,
         "intervals": intervals,
-
-        # legacy (delete in section 16)
-        "duration_seconds": duration_s,
-        "matched_frames": metrics["matched_frames"],
-        "unmatched_frames": metrics["unmatched_frames"],
-        "no_face_frames": metrics["no_face_frames"],
-        "multiple_faces_frames": metrics["multiple_faces_frames"],
-        "match_percentage": metrics["match_pct"],
-        "looking_away_percentage": metrics["away_pct"],
-        "events": [],
     }
 
 

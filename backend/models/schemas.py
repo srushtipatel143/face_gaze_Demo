@@ -94,4 +94,5 @@ class SessionReport(BaseModel):
     overall_verdict: str
     metrics: Dict[str, Any]
     intervals: List[Dict[str, Any]]
+    created_at: Optional[str] = None
 

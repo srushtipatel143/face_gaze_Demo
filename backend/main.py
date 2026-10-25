@@ -14,6 +14,7 @@ Endpoints:
 """
 
 from contextlib import asynccontextmanager, contextmanager
+from datetime import datetime, timezone
 import logging
 import os
 import time
@@ -273,6 +274,7 @@ def stop_live_verification(req: VerificationStopRequest):
         data = store.stop(req.session_id)
     report = evaluate(data.records, data.duration_s, data.calibration)
     report["session_id"] = req.session_id
+    report["created_at"] = datetime.fromtimestamp(session.created_at, timezone.utc).isoformat()
     store.set_report(req.session_id, report)
     save_report(req.session_id, report, data.records)
     return report
