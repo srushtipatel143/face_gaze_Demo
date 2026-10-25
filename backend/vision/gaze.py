@@ -64,6 +64,16 @@ def estimate_head_pose(landmarks, img_w: int, img_h: int) -> Tuple[float, float,
     elif pitch < -90:
         pitch = pitch + 180
 
+    if yaw > 90:
+        yaw = yaw - 180
+    elif yaw < -90:
+        yaw = yaw + 180
+
+    if roll > 90:
+        roll = roll - 180
+    elif roll < -90:
+        roll = roll + 180
+
     return round(pitch, 2), round(yaw, 2), round(roll, 2)
 
 

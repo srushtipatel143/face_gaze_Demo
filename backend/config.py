@@ -36,7 +36,7 @@ REF_MIN_BRIGHTNESS = _f("REF_MIN_BRIGHTNESS", 45.0)     # current
 REF_MAX_BRIGHTNESS = _f("REF_MAX_BRIGHTNESS", 220.0)    # current
 REF_MIN_FACE_RATIO = _f("REF_MIN_FACE_RATIO", 0.05)     # current
 REF_MIN_FACE_PX = _i("REF_MIN_FACE_PX", 80)             # current
-REF_MAX_POSE_DEG = _f("REF_MAX_POSE_DEG", 15.0)         # current
+REF_MAX_POSE_DEG = _f("REF_MAX_POSE_DEG", 22.0)         # current
 
 # ---- Eyes and gaze ------------------------------------------------------------
 EYES_OPEN_MIN = _f("EYES_OPEN_MIN", 0.18)               # current

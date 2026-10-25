@@ -59,7 +59,52 @@ export default function CameraCapture({
     await startCamera();
   };
 
-  const handleCapture = () => {
+  const verifyPhoto = async (photoUrl) => {
+    if (!photoUrl) return;
+
+    setStepState('checking');
+    setNetworkError(null);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/reference`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image: photoUrl }),
+      });
+
+      if (!res.ok) {
+        throw new Error(`Server returned ${res.status}`);
+      }
+
+      const data = await res.json();
+      setChecks(data.checks || DEFAULT_CHECKS);
+
+      if (data.success) {
+        setStepState('accepted');
+        if (onAccepted) {
+          onAccepted({
+            photo: photoUrl,
+            sessionId: data.session_id,
+            checks: data.checks,
+          });
+        }
+        if (onConfirmPhoto) {
+          onConfirmPhoto(photoUrl, data.session_id, data);
+        }
+        return true;
+      } else {
+        setStepState('rejected');
+        return false;
+      }
+    } catch (err) {
+      console.error('Reference photo check failed:', err);
+      setNetworkError('Could not reach the verification service. Try again.');
+      setStepState('preview');
+      return false;
+    }
+  };
+
+  const handleCapture = async () => {
     const video = videoRef.current;
     if (!video) return;
 
@@ -81,9 +126,11 @@ export default function CameraCapture({
     const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
     setCapturedPhoto(dataUrl);
     stopCamera();
-    setStepState('preview');
     setChecks(DEFAULT_CHECKS);
     setNetworkError(null);
+
+    // Immediately verify the photo so Start live check appears without extra clicks
+    await verifyPhoto(dataUrl);
   };
 
   const handleRetake = async () => {
@@ -96,43 +143,9 @@ export default function CameraCapture({
 
   const handleUsePhoto = async () => {
     if (!capturedPhoto || stepState === 'checking') return;
-
-    setStepState('checking');
-    setNetworkError(null);
-
-    try {
-      const res = await fetch(`${API_BASE}/api/reference`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image: capturedPhoto }),
-      });
-
-      if (!res.ok) {
-        throw new Error(`Server returned ${res.status}`);
-      }
-
-      const data = await res.json();
-      setChecks(data.checks || DEFAULT_CHECKS);
-
-      if (data.success) {
-        setStepState('accepted');
-        if (onAccepted) {
-          onAccepted({
-            photo: capturedPhoto,
-            sessionId: data.session_id,
-            checks: data.checks,
-          });
-        }
-        if (onConfirmPhoto) {
-          onConfirmPhoto(capturedPhoto, data.session_id, data);
-        }
-      } else {
-        setStepState('rejected');
-      }
-    } catch (err) {
-      console.error('Reference photo check failed:', err);
-      setNetworkError('Could not reach the verification service. Try again.');
-      setStepState('preview');
+    const ok = await verifyPhoto(capturedPhoto);
+    if (ok && onStartLive) {
+      onStartLive();
     }
   };
 
@@ -248,11 +261,11 @@ export default function CameraCapture({
               </Button>
               <Button
                 variant="primary"
-                icon={Check}
+                icon={Play}
                 onClick={handleUsePhoto}
                 id="btn-use-photo"
               >
-                Use this photo
+                Start live check
               </Button>
             </>
           )}
@@ -270,14 +283,16 @@ export default function CameraCapture({
           )}
 
           {stepState === 'rejected' && (
-            <Button
-              variant="primary"
-              icon={RotateCcw}
-              onClick={handleRetake}
-              id="btn-retake-photo"
-            >
-              Retake
-            </Button>
+            <>
+              <Button
+                variant="primary"
+                icon={RotateCcw}
+                onClick={handleRetake}
+                id="btn-retake-photo"
+              >
+                Retake
+              </Button>
+            </>
           )}
 
           {stepState === 'accepted' && (
