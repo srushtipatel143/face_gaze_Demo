@@ -50,10 +50,11 @@ class VerificationStopRequest(BaseModel):
     session_id: str
 
 class GazeEvent(BaseModel):
-    id: str
+    id: Optional[str] = None
     timestamp: float
     type: str
-    details: Dict[str, Any]
+    message: Optional[str] = None
+    details: Optional[Dict[str, Any]] = Field(default_factory=dict)
 
 class VerdictDetail(BaseModel):
     verdict: str  # "PASS", "FAIL", "REVIEW"

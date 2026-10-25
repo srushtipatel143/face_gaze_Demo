@@ -363,6 +363,8 @@ class SessionDatabase:
                     duration_seconds=duration,
                     bad_baseline=sess.get("bad_baseline", False)
                 )
+                if not summary.get("events") and sess.get("events"):
+                    summary["events"] = sess["events"]
             else:
                 summary = {
                     "duration_seconds": duration,

@@ -439,11 +439,20 @@ def evaluate_session_records(
 
     # Map intervals to legacy events list for backward compatibility
     events = []
-    for iv in all_intervals:
+    for idx, iv in enumerate(all_intervals):
+        evt_type = str(iv.get("type", "EVENT")).upper()
+        evt_msg = str(iv.get("details", ""))
         events.append({
+            "id": f"evt_{idx}_{int(iv.get('start_s', 0.0) * 10)}",
             "timestamp": iv.get("start_s", 0.0),
-            "type": iv.get("type", "EVENT").upper(),
-            "message": iv.get("details", "")
+            "type": evt_type,
+            "message": evt_msg,
+            "details": {
+                "message": evt_msg,
+                "start_s": iv.get("start_s", 0.0),
+                "end_s": iv.get("end_s", 0.0),
+                "duration_s": iv.get("duration_s", 0.0)
+            }
         })
 
     return {

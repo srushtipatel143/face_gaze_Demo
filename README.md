@@ -13,15 +13,35 @@ Before running the project, ensure you have:
 
 ---
 
-## 🚀 Getting Started After Clone
+## 🐳 Docker Quickstart (Recommended)
 
-### 1. Clone the Repository
+You can build and spin up the complete stack (both backend and frontend) with a single command:
+
 ```bash
-git clone https://github.com/srushtipatel143/face_gaze_Demo.git
-cd face_gaze_Demo
+# Build and run containers in the foreground
+docker compose up --build
+
+# Or run in the background (detached mode)
+docker compose up --build -d
+```
+
+- **Frontend App:** [http://localhost:3000](http://localhost:3000)
+- **Backend API:** [http://localhost:8000](http://localhost:8000)
+- **API Swagger Docs:** [http://localhost:8000/docs](http://localhost:8000/docs)
+- **Health Check:** [http://localhost:8000/health](http://localhost:8000/health)
+
+To view logs or stop the containers:
+```bash
+# View backend & frontend logs
+docker compose logs -f
+
+# Stop and remove containers
+docker compose down
 ```
 
 ---
+
+## 🚀 Manual Local Setup (Without Docker)
 
 ### 2. Run the Backend (FastAPI)
 
