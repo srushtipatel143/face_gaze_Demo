@@ -9,114 +9,8 @@ Separates extraction from evaluation:
 from typing import List, Dict, Any, Tuple, Optional
 import numpy as np
 import config
+from intervals import IntervalTracker
 
-
-class IntervalTracker:
-    """
-    Hysteresis interval tracker for episodes of anomalies (M3, L7, L10).
-    - An episode opens after open_after consecutive anomaly frames.
-    - Closes after close_after consecutive normal frames.
-    - Tracks start_s, end_s, duration_s relative to session start.
-    """
-    def __init__(
-        self,
-        interval_type: str = "looking_away",
-        open_after: int = config.GAZE_OPEN_AFTER,
-        close_after: int = config.GAZE_CLOSE_AFTER,
-        max_gap_s: float = config.MAX_UNKNOWN_GAP_S,
-        period_s: float = config.FRAME_PERIOD_S
-    ):
-        self.interval_type = interval_type
-        self.open_after = open_after
-        self.close_after = close_after
-        self.max_gap_s = max_gap_s
-        self.period_s = period_s
-        self.run_start_s: Optional[float] = None
-        self.run_len: int = 0
-        self.ok_len: int = 0
-        self.last_anomaly_t_s: Optional[float] = None
-        self.current: Optional[Dict[str, Any]] = None
-        self.intervals: List[Dict[str, Any]] = []
-
-    def update(
-        self,
-        t_s: float,
-        is_anomaly: Any = False,
-        is_unknown: bool = False,
-        details: str = "",
-        thumbnail: Optional[str] = None
-    ) -> Optional[str]:
-        """Update tracker with frame state at relative time t_s."""
-        event = None
-        if isinstance(is_anomaly, str):
-            state = is_anomaly.lower()
-            if state in ("away", "anomaly", "true"):
-                is_anomaly = True
-                is_unknown = False
-            elif state in ("unknown", "gap"):
-                is_anomaly = False
-                is_unknown = True
-            else:
-                is_anomaly = False
-                is_unknown = False
-
-        if is_unknown:
-            if self.last_anomaly_t_s is not None and (t_s - self.last_anomaly_t_s) > self.max_gap_s:
-                if self._close(self.last_anomaly_t_s + self.period_s):
-                    event = "CLOSED_OK"
-                self._reset_run()
-            return event
-
-        if is_anomaly:
-            self.ok_len = 0
-            if self.run_start_s is None:
-                self.run_start_s = t_s
-            self.run_len += 1
-            self.last_anomaly_t_s = t_s
-            if self.current is None and self.run_len >= self.open_after:
-                self.current = {
-                    "type": self.interval_type,
-                    "start_s": round(self.run_start_s, 2),
-                    "end_s": None,
-                    "duration_s": 0.0,
-                    "details": details,
-                    "thumbnail": thumbnail,
-                    "start": round(self.run_start_s, 2),
-                    "end": None,
-                    "duration": 0.0,
-                }
-                event = "OPENED"
-        else:
-            self.ok_len += 1
-            if self.ok_len >= self.close_after:
-                if self._close(self.last_anomaly_t_s + self.period_s if self.last_anomaly_t_s is not None else t_s):
-                    event = "CLOSED_OK"
-                self._reset_run()
-
-        return event
-
-    def _close(self, end_time_s: Optional[float] = None) -> bool:
-        if self.current is not None:
-            end_t = end_time_s if end_time_s is not None else (
-                self.last_anomaly_t_s + self.period_s if self.last_anomaly_t_s is not None else 0.0
-            )
-            self.current["end_s"] = round(end_t, 2)
-            self.current["duration_s"] = max(0.0, round(self.current["end_s"] - self.current["start_s"], 2))
-            self.current["end"] = self.current["end_s"]
-            self.current["duration"] = self.current["duration_s"]
-            self.intervals.append(self.current)
-            self.current = None
-            return True
-        return False
-
-    def _reset_run(self):
-        self.run_start_s = None
-        self.run_len = 0
-        self.last_anomaly_t_s = None
-
-    def finalize(self, total_duration_s: float):
-        self._close(end_time_s=total_duration_s)
-        self._reset_run()
 
 
 def evaluate_face_verdict(metrics: Dict[str, Any]) -> Tuple[str, List[str]]:
@@ -442,7 +336,7 @@ def evaluate_session_records(
     events = []
     for idx, iv in enumerate(all_intervals):
         evt_type = str(iv.get("type", "EVENT")).upper()
-        evt_msg = str(iv.get("details", ""))
+        evt_msg = str(iv.get("message") or iv.get("details", ""))
         events.append({
             "id": f"evt_{idx}_{int(iv.get('start_s', 0.0) * 10)}",
             "timestamp": iv.get("start_s", 0.0),

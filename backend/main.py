@@ -9,68 +9,56 @@ Endpoints:
 - GET  /health: Service health check.
 """
 
+from contextlib import contextmanager
 import os
 import time
-from fastapi import FastAPI, HTTPException, status
-from fastapi.middleware.cors import CORSMiddleware
+from typing import Any, Dict, Optional
 
-from database import db
-from db_models import get_session_from_db, get_session_failures
+from fastapi import FastAPI, HTTPException, status
+from fastapi.exceptions import ResponseValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from db_models import (
+    get_session_from_db,
+    get_session_failures,
+    save_reference_session,
+    save_session_results,
+)
+from evaluator import evaluate_session_records
 from models.schemas import (
-    ReferencePhotoRequest,
-    ReferenceResponse,
-    VerificationStartRequest,
-    VerificationStartResponse,
+    BoundingBox,
     FrameVerificationRequest,
     FrameVerificationResponse,
-    VerificationStopRequest,
+    LiveEvent,
+    LiveStatus,
+    ReferencePhotoRequest,
+    ReferenceResponse,
     SessionSummaryResponse,
-    BoundingBox
+    VerificationStartRequest,
+    VerificationStartResponse,
+    VerificationStopRequest,
 )
-from dataclasses import asdict
-from typing import Optional, Dict, Any
-from records import FrameAnalysis, MATCH
-from vision.engine import engine, decode_base64_image
-from vision.gaze import classify_gaze
+from session_store import (
+    SessionCompleted,
+    SessionNotActive,
+    SessionNotFound,
+    store,
+)
+from vision.engine import decode_base64_image, engine
 
 
-def _legacy_result(analysis: FrameAnalysis, baseline: Optional[Dict[str, float]]) -> Dict[str, Any]:
-    if analysis.faces_detected == 0 or analysis.faces_detected > 1:
-        gaze_direction = "UNKNOWN"
-        is_looking_away = None
-        calibrating = False
-    elif analysis.yaw is None or analysis.pitch is None or analysis.iris_h is None or analysis.iris_v is None:
-        gaze_direction = "UNKNOWN"
-        is_looking_away = None
-        calibrating = False
-    elif not analysis.eyes_open:
-        gaze_direction = "UNKNOWN"
-        is_looking_away = None
-        calibrating = False
-    elif baseline is None:
-        gaze_direction = "CALIBRATING"
-        is_looking_away = None
-        calibrating = True
-    else:
-        gaze_direction, is_looking_away = classify_gaze(
-            analysis.yaw, analysis.pitch, analysis.iris_h, analysis.iris_v, baseline
-        )
-        calibrating = False
+@contextmanager
+def session_errors():
+    try:
+        yield
+    except SessionNotFound:
+        raise HTTPException(status_code=404, detail="Session not found. Capture a new reference photo.")
+    except SessionCompleted:
+        raise HTTPException(status_code=409, detail="Session already ended. Start a new session.")
+    except SessionNotActive as e:
+        raise HTTPException(status_code=409, detail=f"Session is not active ({e}).")
 
-    thumb = analysis.thumbnail if (analysis.identity != MATCH or is_looking_away is True) else None
-
-    res = asdict(analysis)
-    res.update({
-        "verification_status": analysis.identity,
-        "is_match": analysis.identity == MATCH,
-        "gaze_yaw": analysis.yaw,
-        "gaze_pitch": analysis.pitch,
-        "gaze_direction": gaze_direction,
-        "is_looking_away": is_looking_away,
-        "calibrating": calibrating,
-        "thumbnail": thumb,
-    })
-    return res
 
 app = FastAPI(
     title="Face Verification & Eye-Gaze Tracking API",
@@ -93,8 +81,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-from fastapi.exceptions import ResponseValidationError
-from fastapi.responses import JSONResponse
 
 @app.exception_handler(ResponseValidationError)
 async def response_validation_exception_handler(request, exc):
@@ -103,6 +89,7 @@ async def response_validation_exception_handler(request, exc):
         status_code=500,
         content={"detail": "Response validation error", "errors": exc.errors()}
     )
+
 
 @app.get("/")
 def home():
@@ -117,9 +104,11 @@ def home():
         ]
     }
 
+
 @app.get("/health")
 def health():
     return {"status": "healthy", "timestamp": time.time()}
+
 
 # ---------------------------------------------------------------------------
 # Phase 2: Reference Photo Upload & Session Creation
@@ -134,7 +123,7 @@ def receive_reference_photo(req: ReferencePhotoRequest):
     4. Creates a temporary verification session
     """
     # Clean up stale verification sessions (L5)
-    db.cleanup_old_sessions()
+    store.cleanup_old()
 
     try:
         image = decode_base64_image(req.image)
@@ -157,12 +146,20 @@ def receive_reference_photo(req: ReferencePhotoRequest):
             message=res.get("message", "Reference face validation failed.")
         )
 
-    # Store reference embedding, image, and metadata in database session
-    session_id = db.create_session(
-        reference_embedding=res["embedding"],
-        image_metadata=res.get("metadata", {}),
-        reference_image=req.image
-    )
+    # Store reference embedding and metadata in in-memory session store
+    session_id = store.create(res["embedding"], res.get("metadata", {}))
+
+    # Persist reference session in PostgreSQL
+    try:
+        save_reference_session(
+            session_id=session_id,
+            reference_image=req.image,
+            reference_embedding=res["embedding"],
+            quality_score=res.get("quality_score"),
+            metadata=res.get("metadata", {})
+        )
+    except Exception:
+        pass
 
     return ReferenceResponse(
         success=True,
@@ -173,153 +170,92 @@ def receive_reference_photo(req: ReferencePhotoRequest):
         message="Reference face validated. Session created successfully."
     )
 
+
 # ---------------------------------------------------------------------------
 # Phase 3 & 4: Live Verification Stream & Gaze Tracking
 # ---------------------------------------------------------------------------
 @app.post("/api/verification/start", response_model=VerificationStartResponse)
 def start_live_verification(req: VerificationStartRequest):
-    """Marks the specified session as active for live frame ingestion."""
-    sess = db.get_session(req.session_id)
-    if not sess:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session '{req.session_id}' not found. Please capture a reference photo first."
-        )
-
-    if sess["status"] == "completed":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Session has already completed. Please capture a new reference photo to start a new session."
-        )
-
-    started = db.start_verification(req.session_id)
-    if not started:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Failed to start session verification."
-        )
-
+    with session_errors():
+        store.start(req.session_id)
     return VerificationStartResponse(
         session_id=req.session_id,
         status="active",
-        message="Live verification session started. Ingesting webcam frames."
+        message="Live check started."
     )
+
 
 @app.post("/api/verification/frame", response_model=FrameVerificationResponse)
 def analyze_live_frame(req: FrameVerificationRequest):
-    """
-    Analyzes an incoming webcam frame:
-    - Verifies face match against reference embedding
-    - Determines gaze direction & looking-away flag relative to baseline (M4)
-    - Calculates 3D head pose (yaw/pitch) and bounding box
-    """
-    sess = db.get_session(req.session_id)
-    if not sess:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session '{req.session_id}' not found."
-        )
-
-    if sess["status"] != "active":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Session '{req.session_id}' is {sess['status']}, not active."
-        )
-
+    with session_errors():
+        reference = store.get_reference(req.session_id)
     try:
-        frame_image = decode_base64_image(req.image)
+        image = decode_base64_image(req.image)
     except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Failed to decode frame image: {str(e)}"
-        )
+        raise HTTPException(status_code=400, detail=f"Could not decode frame: {e}")
 
-    ref_embedding = sess["reference_embedding"]
-    baseline = sess.get("baseline")
-    analysis = engine.analyze_frame(frame_image, ref_embedding)
-    result = _legacy_result(analysis, baseline)
+    analysis = engine.analyze_frame(image, reference)       # no store lock held here
 
-    # Record metrics and detect state change events in session database
-    db.add_frame_result(req.session_id, result)
+    with session_errors():
+        update = store.add_frame(req.session_id, analysis)
 
-    box = None
-    if result.get("face_box"):
-        fb = result["face_box"]
-        box = BoundingBox(
-            x=fb["x"],
-            y=fb["y"],
-            width=fb["width"],
-            height=fb["height"]
-        )
-
+    r = update.record
     return FrameVerificationResponse(
         session_id=req.session_id,
-        faces_detected=result["faces_detected"],
-        verification_status=result["verification_status"],
-        similarity=result.get("similarity"),
-        is_match=result["is_match"],
-        gaze_direction=result["gaze_direction"],
-        is_looking_away=result["is_looking_away"],
-        gaze_yaw=result.get("gaze_yaw"),
-        gaze_pitch=result.get("gaze_pitch"),
-        iris_h=result.get("iris_h"),
-        iris_v=result.get("iris_v"),
-        calibrating=result.get("calibrating"),
-        face_box=box,
-        timestamp=time.time()
+        elapsed_s=update.elapsed_s,
+        faces_detected=r.faces_detected,
+        verification_status=r.identity,
+        similarity=r.similarity,
+        is_match=(r.identity == "MATCH"),
+        gaze_direction=r.gaze_direction,
+        is_looking_away=r.is_looking_away,
+        calibrating=r.calibrating,
+        calibration_progress=update.calibration_progress,
+        gaze_yaw=r.yaw,
+        gaze_pitch=r.pitch,
+        iris_h=r.iris_h,
+        iris_v=r.iris_v,
+        face_box=BoundingBox(**r.face_box) if r.face_box else None,
+        live_status=LiveStatus(**update.live_status),
+        events=[LiveEvent(**e) for e in update.events],
+        timestamp=time.time(),
     )
+
 
 # ---------------------------------------------------------------------------
 # Phase 5: Stop Verification & Final Audit Summary
 # ---------------------------------------------------------------------------
 @app.post("/api/verification/stop", response_model=SessionSummaryResponse)
 def stop_live_verification(req: VerificationStopRequest):
-    """
-    Stops live verification and calculates aggregate compliance metrics,
-    match percentages, gaze deviations, and timestamped event logs.
-    """
-    try:
-        summary = db.stop_session(req.session_id)
-        if not summary:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Session '{req.session_id}' not found."
-            )
+    with session_errors():
+        data = store.stop(req.session_id)
 
-        return SessionSummaryResponse(**summary)
-    except HTTPException:
-        raise
-    except Exception as e:
-        import traceback
-        tb = traceback.format_exc()
-        print(f"ERROR in stop_live_verification: {tb}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to calculate session summary: {str(e)}"
-        )
+    records_for_eval = [dict(r.to_dict(), verification_status=r.identity) for r in data.records]
+    summary = evaluate_session_records(records_for_eval, duration_seconds=data.duration_s)
+    summary["session_id"] = req.session_id
+    summary["status"] = "completed"
+    store.set_report(req.session_id, summary)
+
+    try:
+        save_session_results(req.session_id, summary)
+    except Exception:
+        pass
+
+    return SessionSummaryResponse(**summary)
+
 
 @app.get("/api/session/{session_id}")
 def get_session_info(session_id: str):
     """Fetch current session progress and frame counts."""
-    sess = db.get_session(session_id)
-    if not sess:
-        raise HTTPException(status_code=404, detail="Session not found.")
-    
-    # Return safe representation without the numpy embedding
+    with session_errors():
+        sess = store.get(session_id)
     return {
-        "session_id": sess["session_id"],
-        "status": sess["status"],
-        "created_at": sess["created_at"],
-        "start_time": sess["start_time"],
-        "total_frames": sess["total_frames"],
-        "matched_frames": sess["matched_frames"],
-        "unmatched_frames": sess["unmatched_frames"],
-        "no_face_frames": sess["no_face_frames"],
-        "multiple_faces_frames": sess["multiple_faces_frames"],
-        "looking_away_frames": sess["looking_away_frames"],
-        "center_gaze_frames": sess["center_gaze_frames"],
-        "events_count": len(sess["events"])
+        "session_id": sess.session_id,
+        "status": sess.status,
+        "created_at": sess.created_at,
+        "frames": len(sess.records),
     }
+
 
 @app.get("/api/session/{session_id}/stored")
 def get_stored_session_data(session_id: str):
@@ -332,6 +268,7 @@ def get_stored_session_data(session_id: str):
         )
     return data
 
+
 @app.get("/api/session/{session_id}/failures")
 def get_failure_proof_images(session_id: str):
     """Retrieve all proof-of-failure visual snapshots and violation records for this session."""
@@ -341,4 +278,3 @@ def get_failure_proof_images(session_id: str):
         "total_failures": len(failures),
         "failures": failures
     }
-
