@@ -3,6 +3,7 @@ import { Plus, History, WifiOff } from 'lucide-react';
 import CameraCapture from './components/CameraCapture';
 import LiveVerification from './components/LiveVerification';
 import SessionReport from './components/SessionReport';
+import SessionHistory from './components/SessionHistory';
 import { Button, Card, Stepper, Alert } from './components/ui';
 import { API_BASE } from './config';
 import './App.css';
@@ -137,9 +138,14 @@ export default function App() {
         )}
 
         {view === 'history' && (
-          <Card title="Session history" subtitle="Past sessions">
-            <p className="muted">Session history will be available here.</p>
-          </Card>
+          <SessionHistory
+            onOpenReport={(rep) => {
+              setReport(rep);
+              setReportSource('history');
+              setView('report');
+            }}
+            onNewSession={handleNewSession}
+          />
         )}
       </main>
 
