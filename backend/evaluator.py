@@ -52,12 +52,12 @@ def gaze_verdict(m: Dict[str, Any]) -> Dict[str, Any]:
     calib = m.get("calibration", {})
     if calib.get("completed") is False:
         return {"verdict": "REVIEW", "reasons": ["calibration_incomplete"]}
-    if calib.get("unstable") or calib.get("post_calibration_away"):
-        return {"verdict": "REVIEW", "reasons": ["no_stable_baseline"]}
     if m["gaze_valid_frames"] == 0:
         return {"verdict": "REVIEW", "reasons": ["no_data"]}
 
     outcomes: List[Tuple[str, str]] = []
+    if calib.get("unstable") or calib.get("post_calibration_away"):
+        outcomes.append(("REVIEW", "no_stable_baseline"))
     if m["long_away_intervals"] > 0:
         outcomes.append(("FAIL", "long_away"))
     if m["away_pct"] > config.GAZE_AWAY_FAIL_PCT:

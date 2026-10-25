@@ -131,6 +131,7 @@ def health():
 # ---------------------------------------------------------------------------
 # Phase 2: Reference Photo Upload & Session Creation
 # ---------------------------------------------------------------------------
+@app.post("/reference", response_model=ReferenceResponse, include_in_schema=False)
 @app.post("/api/reference", response_model=ReferenceResponse)
 def receive_reference_photo(req: ReferencePhotoRequest):
     """
@@ -192,6 +193,7 @@ def receive_reference_photo(req: ReferencePhotoRequest):
 # ---------------------------------------------------------------------------
 # Phase 3 & 4: Live Verification Stream & Gaze Tracking
 # ---------------------------------------------------------------------------
+@app.post("/start", response_model=VerificationStartResponse, include_in_schema=False)
 @app.post("/api/verification/start", response_model=VerificationStartResponse)
 def start_live_verification(req: VerificationStartRequest):
     with session_errors():
@@ -203,6 +205,7 @@ def start_live_verification(req: VerificationStartRequest):
     )
 
 
+@app.post("/frame", response_model=FrameVerificationResponse, include_in_schema=False)
 @app.post("/api/verification/frame", response_model=FrameVerificationResponse)
 def analyze_live_frame(req: FrameVerificationRequest):
     with session_errors():
@@ -243,6 +246,7 @@ def analyze_live_frame(req: FrameVerificationRequest):
 # ---------------------------------------------------------------------------
 # Phase 5: Stop Verification & Final Audit Summary
 # ---------------------------------------------------------------------------
+@app.post("/stop", response_model=SessionReport, include_in_schema=False)
 @app.post("/api/verification/stop", response_model=SessionReport)
 def stop_live_verification(req: VerificationStopRequest):
     with session_errors():

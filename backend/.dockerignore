@@ -9,3 +9,4 @@ htmlcov
 .git
 .gitignore
 .env
+weights/
