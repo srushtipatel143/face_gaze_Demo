@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { API_BASE } from './config';
-import './LiveVerification.css';
+import { API_BASE } from '../config';
+import '../css/LiveVerification.css';
 
 export default function LiveVerification({ sessionId, referencePhoto, onStopVerification, onBackToCapture }) {
   const videoRef = useRef(null);
@@ -582,13 +582,13 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
           {/* Live Timestamped Event Log (Phases 4 & 5) */}
           <div className="telemetry-card events-card">
             <div className="events-card-header">
-              <h4>Real-Time Event Stream</h4>
-              <span className="event-count-badge">{events.length} events</span>
+              <h4>Live Violation Log</h4>
+              <span className="event-count-badge">{events.length} {events.length === 1 ? 'violation' : 'violations'}</span>
             </div>
             <div className="events-stream-list">
               {events.length === 0 ? (
                 <div className="events-empty">
-                  <span>🟢 Continuous valid face and center gaze stream</span>
+                  <span>🟢 No violations detected</span>
                 </div>
               ) : (
                 events.map((evt) => (
