@@ -49,6 +49,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from fastapi.exceptions import ResponseValidationError
+from fastapi.responses import JSONResponse
+
+@app.exception_handler(ResponseValidationError)
+async def response_validation_exception_handler(request, exc):
+    print("RESPONSE VALIDATION ERROR:", exc.errors())
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Response validation error", "errors": exc.errors()}
+    )
+
 @app.get("/")
 def home():
     return {
@@ -221,14 +232,25 @@ def stop_live_verification(req: VerificationStopRequest):
     Stops live verification and calculates aggregate compliance metrics,
     match percentages, gaze deviations, and timestamped event logs.
     """
-    summary = db.stop_session(req.session_id)
-    if not summary:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session '{req.session_id}' not found."
-        )
+    try:
+        summary = db.stop_session(req.session_id)
+        if not summary:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Session '{req.session_id}' not found."
+            )
 
-    return SessionSummaryResponse(**summary)
+        return SessionSummaryResponse(**summary)
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"ERROR in stop_live_verification: {tb}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to calculate session summary: {str(e)}"
+        )
 
 @app.get("/api/session/{session_id}")
 def get_session_info(session_id: str):
