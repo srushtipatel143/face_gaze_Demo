@@ -4,13 +4,21 @@ from pydantic import BaseModel, Field, ConfigDict
 class ReferencePhotoRequest(BaseModel):
     image: str = Field(..., description="Base64 encoded JPEG/PNG image data or data URL")
 
+class ReferenceCheck(BaseModel):
+    id: str
+    label: str
+    passed: Optional[bool] = None
+    detail: Optional[str] = None
+
+
 class ReferenceResponse(BaseModel):
     success: bool
     session_id: Optional[str] = None
     faces_detected: int
     quality_score: Optional[float] = None
-    issues: List[str] = Field(default_factory=list)
-    message: str
+    checks: List[ReferenceCheck]
+    issues: List[str] = Field(default_factory=list)   # = details of failed checks, kept for compatibility
+    message: str        # "Photo accepted." or "Photo not accepted. See the checks below."
 
 class VerificationStartRequest(BaseModel):
     session_id: str

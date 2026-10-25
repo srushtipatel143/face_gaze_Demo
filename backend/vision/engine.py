@@ -165,70 +165,186 @@ class VisionEngine:
         )
 
     def analyze_reference(self, image: np.ndarray) -> Dict[str, Any]:
-        """Port process_reference_image() here unchanged for now (section 14 rewrites it).
-        Use self.face / self.mesh / self._lock instead of the old attributes."""
+        """Analyze reference photo with structured 7-item checklist."""
         h, w = image.shape[:2]
         with self._lock:
             faces = self.face.detect(image)
             main, count = select_faces(faces)
 
-            if count == 0:
-                return {
-                    "success": False,
-                    "faces_detected": 0,
-                    "issues": ["No face detected"],
-                    "message": "No face detected. Look directly at the camera in good lighting."
-                }
+            # Checks: always 7 items in this exact order
+            checks: List[Dict[str, Any]] = []
 
-            if count > 1:
+            # 1. face_detected
+            face_detected_passed = count >= 1
+            checks.append({
+                "id": "face_detected",
+                "label": "Face detected",
+                "passed": face_detected_passed,
+                "detail": None if face_detected_passed else "No face found. Face the camera in good light."
+            })
+
+            # 2. single_face
+            if not face_detected_passed:
+                single_face_passed = None
+                single_face_detail = None
+            else:
+                single_face_passed = count == 1
+                single_face_detail = None if single_face_passed else "Only you should be in the photo."
+
+            checks.append({
+                "id": "single_face",
+                "label": "Only one person",
+                "passed": single_face_passed,
+                "detail": single_face_detail
+            })
+
+            # If face_detected or single_face fails, all later checks are null
+            if not (face_detected_passed and single_face_passed):
+                for check_id, check_label in [
+                    ("face_size", "Close enough to the camera"),
+                    ("sharpness", "Image is sharp"),
+                    ("lighting", "Good lighting"),
+                    ("facing_camera", "Facing the camera"),
+                    ("eyes_open", "Eyes open"),
+                ]:
+                    checks.append({
+                        "id": check_id,
+                        "label": check_label,
+                        "passed": None,
+                        "detail": None
+                    })
+
+                issues = [c["detail"] for c in checks if c["passed"] is False and c["detail"]]
                 return {
                     "success": False,
                     "faces_detected": count,
-                    "issues": [f"Multiple faces detected ({count})"],
-                    "message": f"Multiple faces detected ({count}). Only one person should be in the photo."
+                    "quality_score": None,
+                    "checks": checks,
+                    "issues": issues,
+                    "embedding": None,
+                    "metadata": {
+                        "width": w,
+                        "height": h,
+                        "quality_score": None,
+                        "checks": checks,
+                        "issues": issues,
+                    }
                 }
 
+            # At this point, count == 1 and main face is found
             face_box = row_to_box(main, w, h)
-            quality_score, issues = assess_quality(image, face_box)
+            fx = max(0, face_box["x"])
+            fy = max(0, face_box["y"])
+            fw = max(1, min(w - fx, face_box["width"]))
+            fh = max(1, min(h - fy, face_box["height"]))
+            face_crop = image[fy:fy + fh, fx:fx + fw]
+            if face_crop.size == 0:
+                face_crop = image
 
+            # 3. face_size
+            face_area = fw * fh
+            img_area = w * h
+            face_ratio = face_area / float(img_area)
+            face_size_passed = bool(
+                face_ratio >= config.REF_MIN_FACE_RATIO
+                and fw >= config.REF_MIN_FACE_PX
+                and fh >= config.REF_MIN_FACE_PX
+            )
+            checks.append({
+                "id": "face_size",
+                "label": "Close enough to the camera",
+                "passed": face_size_passed,
+                "detail": None if face_size_passed else "Move closer to the camera."
+            })
+
+            # 4. sharpness
+            face_gray = cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY)
+            laplacian_var = float(cv2.Laplacian(face_gray, cv2.CV_64F).var())
+            sharpness_passed = bool(laplacian_var >= config.REF_MIN_SHARPNESS)
+            checks.append({
+                "id": "sharpness",
+                "label": "Image is sharp",
+                "passed": sharpness_passed,
+                "detail": None if sharpness_passed else "The photo is blurry. Hold still."
+            })
+
+            # 5. lighting
+            mean_brightness = float(np.mean(face_gray))
+            lighting_passed = bool(config.REF_MIN_BRIGHTNESS <= mean_brightness <= config.REF_MAX_BRIGHTNESS)
+            if lighting_passed:
+                lighting_detail = None
+            elif mean_brightness < config.REF_MIN_BRIGHTNESS:
+                lighting_detail = "Too dark: face a light source."
+            else:
+                lighting_detail = "Too bright: reduce glare."
+            checks.append({
+                "id": "lighting",
+                "label": "Good lighting",
+                "passed": lighting_passed,
+                "detail": lighting_detail
+            })
+
+            # Quality score
+            sharpness_score = min(60.0, (laplacian_var / 120) * 60.0)
+            brightness_score = 40.0 - abs(mean_brightness - 128.0) * (40.0 / 128.0)
+            quality_score = max(5.0, min(100.0, round(sharpness_score + brightness_score, 1)))
+
+            # 6. facing_camera & 7. eyes_open
             rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             mesh_results = self.mesh.process(rgb)
             landmarks = pick_landmarks(mesh_results, face_box, w, h)
+
             if landmarks is None:
-                issues.append("Could not detect face landmarks. Look straight at the camera.")
+                facing_camera_passed = False
+                facing_camera_detail = "Look straight at the camera."
+                eyes_open_passed = False
+                eyes_open_detail = "Keep your eyes open."
             else:
                 pitch, yaw, _ = estimate_head_pose(landmarks, w, h)
-                if abs(yaw) > config.REF_MAX_POSE_DEG or abs(pitch) > config.REF_MAX_POSE_DEG:
-                    issues.append("Face is turned away. Look straight at the camera.")
+                facing_camera_passed = bool(
+                    abs(yaw) <= config.REF_MAX_POSE_DEG
+                    and abs(pitch) <= config.REF_MAX_POSE_DEG
+                )
+                facing_camera_detail = None if facing_camera_passed else "Look straight at the camera."
+
                 _, _, openness, eyes_open = estimate_eyes(landmarks)
-                if not eyes_open:
-                    issues.append("Eyes appear closed. Keep your eyes open.")
+                eyes_open_passed = bool(eyes_open)
+                eyes_open_detail = None if eyes_open_passed else "Keep your eyes open."
 
-            if len(issues) > 0:
-                return {
-                    "success": False,
-                    "faces_detected": 1,
-                    "quality_score": quality_score,
-                    "issues": issues,
-                    "message": f"Photo not accepted: {'; '.join(issues)}"
-                }
+            checks.append({
+                "id": "facing_camera",
+                "label": "Facing the camera",
+                "passed": facing_camera_passed,
+                "detail": facing_camera_detail
+            })
 
-            embedding = self.face.embed(image, main)
+            checks.append({
+                "id": "eyes_open",
+                "label": "Eyes open",
+                "passed": eyes_open_passed,
+                "detail": eyes_open_detail
+            })
+
+            success = all(c["passed"] is True for c in checks)
+            issues = [c["detail"] for c in checks if c["passed"] is False and c["detail"]]
+
+            embedding = self.face.embed(image, main) if success else None
 
             return {
-                "success": True,
+                "success": success,
                 "faces_detected": 1,
                 "quality_score": quality_score,
+                "checks": checks,
+                "issues": issues,
                 "embedding": embedding,
                 "face_box": face_box,
-                "issues": [],
                 "metadata": {
                     "width": w,
                     "height": h,
                     "quality_score": quality_score,
-                    "issues": issues
-                },
-                "message": "Photo accepted."
+                    "checks": checks,
+                    "issues": issues,
+                }
             }
 
 

@@ -39,6 +39,7 @@ from models.schemas import (
     FrameVerificationResponse,
     LiveEvent,
     LiveStatus,
+    ReferenceCheck,
     ReferencePhotoRequest,
     ReferenceResponse,
     SessionReport,
@@ -147,22 +148,36 @@ def receive_reference_photo(req: ReferencePhotoRequest):
     try:
         image = decode_base64_image(req.image)
     except Exception as e:
+        empty_checks = [
+            ReferenceCheck(id="face_detected", label="Face detected", passed=False, detail="No face found. Face the camera in good light."),
+            ReferenceCheck(id="single_face", label="Only one person", passed=None, detail=None),
+            ReferenceCheck(id="face_size", label="Close enough to the camera", passed=None, detail=None),
+            ReferenceCheck(id="sharpness", label="Image is sharp", passed=None, detail=None),
+            ReferenceCheck(id="lighting", label="Good lighting", passed=None, detail=None),
+            ReferenceCheck(id="facing_camera", label="Facing the camera", passed=None, detail=None),
+            ReferenceCheck(id="eyes_open", label="Eyes open", passed=None, detail=None),
+        ]
         return ReferenceResponse(
             success=False,
             faces_detected=0,
-            quality_score=0.0,
-            message=f"Invalid image format: {str(e)}"
+            quality_score=None,
+            checks=empty_checks,
+            issues=["No face found. Face the camera in good light."],
+            message="Photo not accepted. See the checks below."
         )
 
     res = engine.analyze_reference(image)
+    checks = [ReferenceCheck(**c) for c in res.get("checks", [])]
+    issues = res.get("issues", [])
 
     if not res.get("success", False):
         return ReferenceResponse(
             success=False,
             faces_detected=res.get("faces_detected", 0),
             quality_score=res.get("quality_score"),
-            issues=res.get("issues", []),
-            message=res.get("message", "Photo not accepted.")
+            checks=checks,
+            issues=issues,
+            message="Photo not accepted. See the checks below."
         )
 
     # Store reference embedding and metadata in in-memory session store
@@ -185,6 +200,7 @@ def receive_reference_photo(req: ReferencePhotoRequest):
         session_id=session_id,
         faces_detected=1,
         quality_score=res.get("quality_score", 100.0),
+        checks=checks,
         issues=[],
         message="Photo accepted."
     )

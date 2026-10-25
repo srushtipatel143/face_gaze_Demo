@@ -109,56 +109,13 @@ export default function App() {
 
       <main className="app-main">
         {view === 'capture' && (
-          <div className="workspace-grid">
-            <div className="camera-section">
-              <CameraCapture
-                onConfirmPhoto={handlePhotoConfirmed}
-                confirmedPhoto={reference?.photo}
-              />
-            </div>
-
-            <aside className="sidebar-card">
-              {reference?.sessionId ? (
-                <Card title="Photo accepted" subtitle="Ready for live check">
-                  <div style={{ display: 'grid', gap: '16px' }}>
-                    <img
-                      src={reference.photo}
-                      alt="Reference photo"
-                      style={{
-                        width: '100%',
-                        maxHeight: '200px',
-                        objectFit: 'cover',
-                        borderRadius: 'var(--radius-sm)',
-                        border: '1px solid var(--border)',
-                      }}
-                    />
-                    <p className="muted">
-                      Photo accepted. You can now start the live check.
-                    </p>
-                    <Button
-                      variant="primary"
-                      size="lg"
-                      onClick={handleStartLive}
-                      id="btn-start-live-check"
-                    >
-                      Start live check
-                    </Button>
-                  </div>
-                </Card>
-              ) : (
-                <Card title="No photo yet" subtitle="Take your reference photo">
-                  <p className="muted" style={{ marginBottom: '12px' }}>
-                    Take a clear photo of your face. It is used to confirm it is you during the live check.
-                  </p>
-                  <ul className="muted" style={{ margin: 0, paddingLeft: '20px', display: 'grid', gap: '4px' }}>
-                    <li>Single face in frame</li>
-                    <li>Good lighting</li>
-                    <li>Look straight at the camera</li>
-                  </ul>
-                </Card>
-              )}
-            </aside>
-          </div>
+          <CameraCapture
+            onAccepted={({ photo, sessionId, checks }) => {
+              handlePhotoConfirmed(photo, sessionId, checks);
+            }}
+            onStartLive={handleStartLive}
+            initialReference={reference}
+          />
         )}
 
         {view === 'live' && (
