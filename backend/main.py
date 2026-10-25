@@ -74,11 +74,11 @@ def session_errors():
     try:
         yield
     except SessionNotFound:
-        raise HTTPException(status_code=404, detail="Session not found. Capture a new reference photo.")
+        raise HTTPException(status_code=404, detail="Session not found. Take a new reference photo.")
     except SessionCompleted:
-        raise HTTPException(status_code=409, detail="Session already ended. Start a new session.")
-    except SessionNotActive as e:
-        raise HTTPException(status_code=409, detail=f"Session is not active ({e}).")
+        raise HTTPException(status_code=409, detail="Session has already ended. Start a new session.")
+    except SessionNotActive:
+        raise HTTPException(status_code=409, detail="Session is not active.")
 
 
 app = FastAPI(title="Identity & Attention Check API", version="1.1.0", lifespan=lifespan)
@@ -111,7 +111,7 @@ async def response_validation_exception_handler(request, exc):
 @app.get("/")
 def home():
     return {
-        "service": "Face Verification & Eye-Gaze AI API",
+        "service": "Identity & Attention Check API",
         "status": "online",
         "endpoints": [
             "/api/reference",
@@ -129,7 +129,7 @@ def health():
 
 
 # ---------------------------------------------------------------------------
-# Phase 2: Reference Photo Upload & Session Creation
+# Reference Photo Upload & Session Creation
 # ---------------------------------------------------------------------------
 @app.post("/reference", response_model=ReferenceResponse, include_in_schema=False)
 @app.post("/api/reference", response_model=ReferenceResponse)
@@ -138,7 +138,7 @@ def receive_reference_photo(req: ReferencePhotoRequest):
     Validates uploaded reference snapshot:
     1. Decodes base64 image data
     2. Validates single face presence and quality metrics (blur, lighting, resolution)
-    3. Generates invariant 3D landmark biometric reference embedding
+    3. Generates invariant 3D landmark reference embedding
     4. Creates a temporary verification session
     """
     # Clean up stale verification sessions (L5)
@@ -162,7 +162,7 @@ def receive_reference_photo(req: ReferencePhotoRequest):
             faces_detected=res.get("faces_detected", 0),
             quality_score=res.get("quality_score"),
             issues=res.get("issues", []),
-            message=res.get("message", "Reference face validation failed.")
+            message=res.get("message", "Photo not accepted.")
         )
 
     # Store reference embedding and metadata in in-memory session store
@@ -186,7 +186,7 @@ def receive_reference_photo(req: ReferencePhotoRequest):
         faces_detected=1,
         quality_score=res.get("quality_score", 100.0),
         issues=[],
-        message="Reference face validated. Session created successfully."
+        message="Photo accepted."
     )
 
 

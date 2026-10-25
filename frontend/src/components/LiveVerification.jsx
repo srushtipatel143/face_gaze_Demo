@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { Disclosure } from './ui';
 import { API_BASE } from '../config';
 import '../css/LiveVerification.css';
 
@@ -77,20 +78,20 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
       const displayX = vidW - (x + width);
 
       let strokeColor = '#10B981'; // Green for match & center
-      let statusText = 'VERIFIED MATCH';
+      let statusText = 'Match';
 
       if (frameData.verification_status === 'NO_MATCH') {
         strokeColor = '#EF4444';
-        statusText = 'NO MATCH';
+        statusText = 'No match';
       } else if (frameData.verification_status === 'UNKNOWN') {
         strokeColor = '#F59E0B';
-        statusText = 'HEAD TURNED • UNCERTAIN';
+        statusText = 'Face turned away';
       } else if (frameData.verification_status === 'MULTIPLE_FACES') {
         strokeColor = '#DC2626';
-        statusText = 'MULTIPLE FACES';
+        statusText = 'Multiple faces';
       } else if (frameData.is_looking_away === true) {
         strokeColor = '#F59E0B';
-        statusText = `MATCH • ${frameData.gaze_direction ? frameData.gaze_direction.replace('_', ' ') : 'LOOKING AWAY'}`;
+        statusText = 'Looking away';
       }
 
       // Rounded Bounding Box
@@ -152,7 +153,7 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Draw raw unmirrored video frame to canvas for backend biometric & gaze analysis (L4)
+    // Draw raw unmirrored video frame to canvas for backend face & gaze analysis
     ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
 
     // Use JPEG quality 0.70 for live stream frames (L3)
@@ -209,19 +210,19 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
         return next;
       });
 
-      // Add audit events to the real-time feed
+      // Add events to the activity feed
       if (data.verification_status === 'NO_FACE') {
-        addLocalEvent('⚠️ Face Lost', 'No face detected in camera viewport', 'warning');
+        addLocalEvent('Face not visible', 'No face detected in camera view', 'warning');
       } else if (data.verification_status === 'MULTIPLE_FACES') {
-        addLocalEvent('🚨 Multiple Faces', `${data.faces_detected} faces detected in frame`, 'danger');
+        addLocalEvent('Another person', `${data.faces_detected} faces detected in frame`, 'danger');
       } else if (data.verification_status === 'NO_MATCH') {
-        addLocalEvent('❌ Identity Mismatch', `Similarity: ${(data.similarity * 100).toFixed(1)}%`, 'danger');
+        addLocalEvent('Different person', `Similarity: ${(data.similarity * 100).toFixed(1)}%`, 'danger');
       } else if (data.verification_status === 'UNKNOWN') {
-        addLocalEvent('⚠️ Angle Too Steep', 'Face turned far from camera (>35° yaw/pitch)', 'warning');
+        addLocalEvent('Face turned away', 'Face turned far from camera (>35°)', 'warning');
       } else if (data.calibrating || data.gaze_direction === 'CALIBRATING') {
         // Calibrating baseline gaze
       } else if (data.is_looking_away === true) {
-        addLocalEvent('👀 Looking Away', `Direction: ${data.gaze_direction.replace('_', ' ')}`, 'warning');
+        addLocalEvent('Looked away', `Direction: ${data.gaze_direction ? data.gaze_direction.replace('_', ' ').toLowerCase() : 'away'}`, 'warning');
       }
 
       // Draw bounding box & landmark indicators on overlay canvas (scale box coordinates if downscaled)
@@ -232,7 +233,7 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
       // After 3 consecutive failures, clear latestFrame, show warning banner, and grey out overlay (M5)
       if (consecutiveFailuresRef.current >= 3) {
         setLatestFrame(null);
-        setConnectionWarning('Lost connection to the verification service. Attempting to reconnect...');
+        setConnectionWarning('Connection lost. Retrying…');
         const overlay = overlayCanvasRef.current;
         if (overlay) {
           const overlayCtx = overlay.getContext('2d');
@@ -341,14 +342,13 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
       {/* Hidden off-screen canvas used for capturing jpeg frame */}
       <canvas ref={canvasRef} style={{ display: 'none' }} />
 
-      {/* Top Header & HUD */}
+      {/* Top Header */}
       <div className="live-header">
         <div className="header-left">
           <div className="pulse-indicator">
             <span className="live-dot"></span>
-            <span className="live-label">LIVE VERIFICATION ACTIVE</span>
+            <span className="live-label">Session in progress</span>
           </div>
-          <span className="session-id-pill">Session: {sessionId}</span>
         </div>
 
         <div className="header-right">
@@ -359,26 +359,26 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
             id="btn-stop-verification"
             disabled={isStopping}
           >
-            {isStopping ? 'Finalizing Session...' : '⏹ Stop Verification & View Results'}
+            {isStopping ? 'Ending…' : 'End session'}
           </button>
         </div>
       </div>
 
       {error && (
         <div className="live-error-banner">
-          <span>⚠️ <strong>Error:</strong> {error}</span>
+          <span><strong>Error:</strong> {error}</span>
           <div style={{ display: 'inline-flex', gap: '8px', marginLeft: '12px' }}>
             <button className="btn-small-link" onClick={handleStop} disabled={isStopping}>
-              {isStopping ? 'Retrying...' : 'Retry'}
+              {isStopping ? 'Retrying…' : 'Retry'}
             </button>
             <button className="btn-small-link" onClick={onBackToCapture}>
-              Return to Reference Capture
+              Back to reference photo
             </button>
           </div>
         </div>
       )}
 
-      {/* Main Verification Workspace: Live Viewport + Real-Time Telemetry */}
+      {/* Main Workspace: Live Viewport + Sidebar */}
       <div className="live-grid">
         {/* Live Camera Viewport */}
         <div className="viewport-card">
@@ -393,31 +393,29 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
             {/* Overlay Canvas for Bounding Box & Landmarks */}
             <canvas ref={overlayCanvasRef} className="overlay-canvas" />
 
-            {/* Connection Warning Banner (M5) */}
+            {/* Connection Warning Banner */}
             {connectionWarning && (
               <div className="connection-lost-banner" role="alert">
-                <span className="warning-icon">⚠️</span>
                 <span>{connectionWarning}</span>
               </div>
             )}
 
-            {/* Calibration Banner (M4) */}
+            {/* Calibration Banner */}
             {latestFrame && (latestFrame.calibrating || latestFrame.gaze_direction === 'CALIBRATING') && (
               <div className="calibration-banner">
                 <span className="pulse-dot"></span>
-                <span>Calibrating baseline gaze... Please look at screen normally</span>
+                <span>Look at the screen normally while we calibrate</span>
               </div>
             )}
 
-            {/* Fatal Session Error Modal (M5) */}
+            {/* Fatal Session Error Modal */}
             {fatalSessionError && (
               <div className="fatal-error-overlay">
                 <div className="fatal-error-card">
-                  <div className="fatal-error-icon">🛑</div>
-                  <h3>Session Terminated</h3>
+                  <h3>Session ended</h3>
                   <p>{fatalSessionError}</p>
                   <button className="btn-primary" onClick={onBackToCapture}>
-                    Return to Reference Capture
+                    Back to reference photo
                   </button>
                 </div>
               </div>
@@ -427,30 +425,21 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
             <div className="hud-overlay-top">
               {latestFrame ? (
                 <div className={`status-tag ${latestFrame.verification_status.toLowerCase()}`}>
-                  <span className="tag-icon">
-                    {latestFrame.verification_status === 'MATCH'
-                      ? '✓'
-                      : latestFrame.verification_status === 'NO_MATCH'
-                      ? '✕'
-                      : latestFrame.verification_status === 'UNKNOWN'
-                      ? '❓'
-                      : '⚠️'}
-                  </span>
                   <span className="tag-text">
                     {latestFrame.verification_status === 'MATCH'
-                      ? 'IDENTITY MATCH'
+                      ? 'Match'
                       : latestFrame.verification_status === 'NO_MATCH'
-                      ? 'IDENTITY MISMATCH'
+                      ? 'Different face'
                       : latestFrame.verification_status === 'UNKNOWN'
-                      ? 'IDENTITY UNCERTAIN (HEAD TURNED)'
+                      ? 'Face turned away'
                       : latestFrame.verification_status === 'NO_FACE'
-                      ? 'NO FACE DETECTED'
-                      : 'MULTIPLE FACES DETECTED'}
+                      ? 'No face'
+                      : 'Another person'}
                   </span>
                 </div>
               ) : (
                 <div className="status-tag initializing">
-                  <span className="spinner-dot"></span> Ingesting frames...
+                  <span className="spinner-dot"></span> Starting…
                 </div>
               )}
 
@@ -464,27 +453,22 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
                       : 'unknown'
                   }`}
                 >
-                  <span className="gaze-icon">
-                    {latestFrame.calibrating || latestFrame.gaze_direction === 'CALIBRATING'
-                      ? '🎯'
-                      : latestFrame.gaze_direction === 'CENTER'
-                      ? '🎯'
-                      : latestFrame.gaze_direction === 'LOOKING_LEFT'
-                      ? '⬅️'
-                      : latestFrame.gaze_direction === 'LOOKING_RIGHT'
-                      ? '➡️'
-                      : latestFrame.gaze_direction === 'LOOKING_UP'
-                      ? '⬆️'
-                      : latestFrame.gaze_direction === 'LOOKING_DOWN'
-                      ? '⬇️'
-                      : '👁️'}
-                  </span>
                   <span>
                     {latestFrame.calibrating || latestFrame.gaze_direction === 'CALIBRATING'
-                      ? 'CALIBRATING'
-                      : latestFrame.gaze_direction
-                      ? latestFrame.gaze_direction.replace('_', ' ')
-                      : 'UNKNOWN'}
+                      ? 'Calibrating'
+                      : latestFrame.gaze_direction === 'CENTER'
+                      ? 'On screen'
+                      : latestFrame.gaze_direction === 'LOOKING_LEFT'
+                      ? 'Looking left'
+                      : latestFrame.gaze_direction === 'LOOKING_RIGHT'
+                      ? 'Looking right'
+                      : latestFrame.gaze_direction === 'LOOKING_UP'
+                      ? 'Looking up'
+                      : latestFrame.gaze_direction === 'LOOKING_DOWN'
+                      ? 'Looking down'
+                      : latestFrame.is_looking_away
+                      ? 'Looking away'
+                      : 'On screen'}
                   </span>
                 </div>
               )}
@@ -502,7 +486,7 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
               </div>
 
               <div className="hud-metric">
-                <span className="metric-title">Head Pose</span>
+                <span className="metric-title">Head pose</span>
                 <span className="metric-number">
                   {latestFrame?.gaze_yaw !== null && latestFrame?.gaze_yaw !== undefined
                     ? `Y:${latestFrame.gaze_yaw > 0 ? '+' : ''}${latestFrame.gaze_yaw}° P:${latestFrame.gaze_pitch > 0 ? '+' : ''}${latestFrame.gaze_pitch}°`
@@ -518,37 +502,37 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
           </div>
         </div>
 
-        {/* Real-time Telemetry & Live Event Log Sidebar */}
-        <div className="telemetry-sidebar">
+        {/* Sidebar */}
+        <div className="live-sidebar">
           {/* Reference Photo Comparison Card */}
-          <div className="telemetry-card">
-            <h4>Reference Identity</h4>
+          <div className="live-card">
+            <h4>Reference photo</h4>
             <div className="reference-compare-row">
               <img src={referencePhoto} alt="Reference face" className="ref-compare-thumb" />
               <div className="ref-compare-details">
                 <div className="detail-item">
                   <span className="detail-label">Status</span>
-                  <span className="detail-value text-success">Active Session</span>
+                  <span className="detail-value text-success">Active</span>
                 </div>
                 <div className="detail-item">
-                  <span className="detail-label">Algorithm</span>
-                  <span className="detail-value">Face match (SFace)</span>
+                  <span className="detail-label">Face check</span>
+                  <span className="detail-value">Face matching</span>
                 </div>
                 <div className="detail-item">
-                  <span className="detail-label">Gaze Tracking</span>
-                  <span className="detail-value">Head pose + iris position</span>
+                  <span className="detail-label">Attention</span>
+                  <span className="detail-value">Iris tracking</span>
                 </div>
               </div>
             </div>
           </div>
 
-          {/* Running Compliance Gauges */}
-          <div className="telemetry-card">
-            <h4>Live Compliance Metrics</h4>
+          {/* Running Gauges */}
+          <div className="live-card">
+            <h4>Live status</h4>
             <div className="gauge-group">
               <div className="gauge-item">
                 <div className="gauge-header">
-                  <span>Match Consistency</span>
+                  <span>Identity match</span>
                   <span className="gauge-val">{matchRate !== null ? `${matchRate}%` : '—'}</span>
                 </div>
                 <div className="gauge-track">
@@ -561,9 +545,9 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
 
               <div className="gauge-item">
                 <div className="gauge-header">
-                  <span>Gaze Attention (Center)</span>
+                  <span>Time on screen</span>
                   <span className="gauge-val">
-                    {isCalibratingGaze ? 'Calibrating...' : gazeAttentionRate !== null ? `${gazeAttentionRate}%` : '—'}
+                    {isCalibratingGaze ? 'Calibrating…' : gazeAttentionRate !== null ? `${gazeAttentionRate}%` : '—'}
                   </span>
                 </div>
                 <div className="gauge-track">
@@ -576,16 +560,16 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
             </div>
           </div>
 
-          {/* Live Timestamped Event Log (Phases 4 & 5) */}
-          <div className="telemetry-card events-card">
+          {/* Activity Log */}
+          <div className="live-card events-card">
             <div className="events-card-header">
-              <h4>Live Violation Log</h4>
-              <span className="event-count-badge">{events.length} {events.length === 1 ? 'violation' : 'violations'}</span>
+              <h4>Activity</h4>
+              <span className="event-count-badge">{events.length} {events.length === 1 ? 'event' : 'events'}</span>
             </div>
             <div className="events-stream-list">
               {events.length === 0 ? (
                 <div className="events-empty">
-                  <span>🟢 No violations detected</span>
+                  <span>No issues so far</span>
                 </div>
               ) : (
                 events.map((evt) => (
@@ -599,6 +583,15 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
                 ))
               )}
             </div>
+          </div>
+
+          {/* Technical Details */}
+          <div className="live-card">
+            <Disclosure title="Technical details">
+              <div style={{ fontSize: '0.82rem', display: 'grid', gap: '6px', marginTop: '8px' }}>
+                <div><span style={{ color: '#94a3b8' }}>Session ID:</span> <span style={{ fontFamily: 'monospace' }}>{sessionId}</span></div>
+              </div>
+            </Disclosure>
           </div>
         </div>
       </div>

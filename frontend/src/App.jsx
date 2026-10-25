@@ -119,7 +119,7 @@ export default function App() {
 
             <aside className="sidebar-card">
               {reference?.sessionId ? (
-                <Card title="Reference photo accepted" subtitle="Biometric baseline ready">
+                <Card title="Photo accepted" subtitle="Ready for live check">
                   <div style={{ display: 'grid', gap: '16px' }}>
                     <img
                       src={reference.photo}
@@ -133,7 +133,7 @@ export default function App() {
                       }}
                     />
                     <p className="muted">
-                      Reference photo accepted. You can now start the live check.
+                      Photo accepted. You can now start the live check.
                     </p>
                     <Button
                       variant="primary"
@@ -146,14 +146,14 @@ export default function App() {
                   </div>
                 </Card>
               ) : (
-                <Card title="No reference photo yet" subtitle="Capture a reference face">
+                <Card title="No photo yet" subtitle="Take your reference photo">
                   <p className="muted" style={{ marginBottom: '12px' }}>
-                    Position your face clearly in the camera frame, then capture and confirm.
+                    Take a clear photo of your face. It is used to confirm it is you during the live check.
                   </p>
                   <ul className="muted" style={{ margin: 0, paddingLeft: '20px', display: 'grid', gap: '4px' }}>
                     <li>Single face in frame</li>
-                    <li>Good ambient lighting</li>
-                    <li>Look directly at the camera</li>
+                    <li>Good lighting</li>
+                    <li>Look straight at the camera</li>
                   </ul>
                 </Card>
               )}
@@ -179,7 +179,7 @@ export default function App() {
         )}
 
         {view === 'history' && (
-          <Card title="Session history" subtitle="Past verification audits">
+          <Card title="Session history" subtitle="Past sessions">
             <p className="muted">Session history will be available here.</p>
           </Card>
         )}

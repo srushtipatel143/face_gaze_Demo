@@ -3,8 +3,8 @@ import { API_BASE } from '../config';
 import '../css/CameraCapture.css';
 
 /**
- * CameraCapture component for Phase 1: Reference Photo Capture
- * Handles webcam stream initialization, mirror preview, oval face guide,
+ * CameraCapture component for Reference Photo Capture
+ * Handles webcam stream initialization, mirror preview, outline face guide,
  * snapshot capture to canvas, track cleanup, retake, and confirmation.
  */
 export default function CameraCapture({ onConfirmPhoto, confirmedPhoto = null }) {
@@ -82,13 +82,13 @@ export default function CameraCapture({ onConfirmPhoto, confirmedPhoto = null })
       setCameraActive(false);
 
       if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-        setError('Camera permission denied. Please allow camera access in your browser address bar and click "Open Camera".');
+        setError("Camera access is blocked. Allow it in your browser's address bar, then try again.");
       } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
-        setError('No camera device was found. Please ensure a webcam is connected and enabled.');
+        setError('No camera found. Connect a camera and try again.');
       } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
-        setError('Webcam is currently in use by another application. Please close other camera apps and retry.');
+        setError('The camera is in use by another app. Close it and try again.');
       } else {
-        setError(err.message || 'Unable to access camera.');
+        setError(err.message || 'Could not access the camera. Check your browser permissions and try again.');
       }
     }
   }, [stopCamera]);
@@ -116,7 +116,7 @@ export default function CameraCapture({ onConfirmPhoto, confirmedPhoto = null })
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Draw raw unmirrored video frame directly to canvas for backend biometric analysis (L4)
+    // Draw raw unmirrored video frame directly to canvas for backend face analysis
     ctx.drawImage(video, 0, 0, width, height);
 
     // Export high-quality JPEG
@@ -142,7 +142,7 @@ export default function CameraCapture({ onConfirmPhoto, confirmedPhoto = null })
     startCamera();
   };
 
-  // Confirm photo and validate via Phase 2 backend
+  // Confirm photo and validate via reference endpoint
   const handleConfirm = async () => {
     if (!capturedImage || isValidating) return;
 
@@ -164,7 +164,7 @@ export default function CameraCapture({ onConfirmPhoto, confirmedPhoto = null })
       const data = await response.json();
 
       if (!data.success) {
-        setError(data.message || 'Face validation failed. Please retake the photo.');
+        setError(data.message || 'Photo not accepted. Try again.');
         setValidationIssues(data.issues || []);
         setIsValidating(false);
         return;
@@ -181,7 +181,7 @@ export default function CameraCapture({ onConfirmPhoto, confirmedPhoto = null })
       }
     } catch (err) {
       console.error('Validation request error:', err);
-      setError(`Backend error: ${err.message}. Ensure the FastAPI server is running on port 8000.`);
+      setError(`Connection error: ${err.message}. Check that the backend is running.`);
       setIsValidating(false);
     }
   };
@@ -191,30 +191,29 @@ export default function CameraCapture({ onConfirmPhoto, confirmedPhoto = null })
       {/* Hidden canvas for snapshot rasterization */}
       <canvas ref={canvasRef} style={{ display: 'none' }} />
 
-      {/* Header section with phase badge */}
+      {/* Header section */}
       <div className="camera-header">
         <div className="camera-badge">
           <span className={`status-dot ${isConfirmed ? 'confirmed' : cameraActive ? 'active' : 'idle'}`}></span>
           {isConfirmed
-            ? 'Reference Photo Confirmed'
+            ? 'Photo accepted'
             : capturedImage
-            ? 'Photo Captured — Review & Confirm'
+            ? 'Review photo'
             : cameraActive
-            ? 'Live Webcam Active'
-            : 'Camera Ready'}
+            ? 'Camera on'
+            : 'Camera ready'}
         </div>
-        <h2 className="camera-title">Capture Reference Photo</h2>
+        <h2 className="camera-title">Reference photo</h2>
         <p className="camera-subtitle">
-          Position your face clearly in the center under good lighting. This image establishes your reference identity.
+          Take a clear photo of your face. It is used to confirm it is you during the live check.
         </p>
       </div>
 
       {/* Error Banner */}
       {error && (
         <div className="camera-error-banner" role="alert">
-          <div className="error-icon">⚠️</div>
           <div className="error-content">
-            <strong>Photo Quality Issue:</strong>
+            <strong>Photo not accepted:</strong>
             <p>{error}</p>
             {validationIssues && validationIssues.length > 0 && (
               <ul className="error-issues-list" style={{ marginTop: '0.45rem', paddingLeft: '1.2rem', fontSize: '0.85rem', color: '#fca5a5' }}>
@@ -237,7 +236,7 @@ export default function CameraCapture({ onConfirmPhoto, confirmedPhoto = null })
           <div className="preview-container">
             <img src={capturedImage} alt="Captured reference face" className="preview-image" />
             <div className="preview-overlay-tag">
-              {isConfirmed ? '✅ Confirmed Reference' : '📷 Captured Snapshot'}
+              {isConfirmed ? 'Photo accepted' : 'Photo taken'}
             </div>
           </div>
         ) : (
@@ -253,10 +252,9 @@ export default function CameraCapture({ onConfirmPhoto, confirmedPhoto = null })
 
             {!cameraActive && !isLoadingCamera && (
               <div className="camera-placeholder">
-                <div className="placeholder-icon">📷</div>
-                <p className="placeholder-text">Camera is currently paused or inactive</p>
+                <p className="placeholder-text">Camera is off</p>
                 <button className="btn btn-primary" onClick={startCamera}>
-                  Start Webcam
+                  Turn on camera
                 </button>
               </div>
             )}
@@ -264,18 +262,18 @@ export default function CameraCapture({ onConfirmPhoto, confirmedPhoto = null })
             {isLoadingCamera && (
               <div className="camera-loading">
                 <div className="spinner"></div>
-                <p>Initializing camera sensor...</p>
+                <p>Starting camera…</p>
               </div>
             )}
 
-            {/* Oval Face Guide Overlay */}
+            {/* Face Guide Overlay */}
             {cameraActive && showGuide && (
-              <div className="face-guide-overlay" title="Align your face within the oval">
+              <div className="face-guide-overlay" title="Fit your face inside the outline">
                 <div className="face-oval">
                   <div className="crosshair-h"></div>
                   <div className="crosshair-v"></div>
                 </div>
-                <span className="guide-hint">Align your face inside the oval</span>
+                <span className="guide-hint">Fit your face inside the outline</span>
               </div>
             )}
           </div>
@@ -294,7 +292,7 @@ export default function CameraCapture({ onConfirmPhoto, confirmedPhoto = null })
                 onClick={() => setShowGuide((prev) => !prev)}
                 title="Toggle alignment guide"
               >
-                {showGuide ? 'Hide Guide' : 'Show Guide'}
+                {showGuide ? 'Hide guide' : 'Show guide'}
               </button>
               <button
                 type="button"
@@ -303,15 +301,15 @@ export default function CameraCapture({ onConfirmPhoto, confirmedPhoto = null })
                 id="btn-capture-photo"
               >
                 <span className="shutter-circle"></span>
-                Capture Photo
+                Take photo
               </button>
               <button
                 type="button"
                 className="btn btn-secondary"
                 onClick={stopCamera}
-                title="Turn off webcam"
+                title="Turn off camera"
               >
-                Stop Camera
+                Turn off camera
               </button>
             </div>
           ) : (
@@ -321,7 +319,7 @@ export default function CameraCapture({ onConfirmPhoto, confirmedPhoto = null })
               onClick={startCamera}
               id="btn-open-camera"
             >
-              Open Camera
+              Turn on camera
             </button>
           )
         ) : (
@@ -333,7 +331,7 @@ export default function CameraCapture({ onConfirmPhoto, confirmedPhoto = null })
               onClick={handleRetake}
               id="btn-retake-photo"
             >
-              🔄 Retake Photo
+              Retake
             </button>
             <button
               type="button"
@@ -343,10 +341,10 @@ export default function CameraCapture({ onConfirmPhoto, confirmedPhoto = null })
               disabled={isConfirmed || isValidating}
             >
               {isValidating
-                ? '⏳ Validating Face...'
+                ? 'Checking photo…'
                 : isConfirmed
-                ? '✓ Photo Accepted'
-                : '✓ Confirm Photo'}
+                ? 'Photo accepted'
+                : 'Use this photo'}
             </button>
           </div>
         )}
@@ -355,17 +353,12 @@ export default function CameraCapture({ onConfirmPhoto, confirmedPhoto = null })
       {/* Confirmed info alert */}
       {isConfirmed && (
         <div className="confirmation-banner">
-          <div className="banner-icon">🎯</div>
           <div className="banner-text">
-            <strong>Reference photo accepted</strong>
-            <p>
-              Single clear face detected and validated
-              {validationResult?.quality_score ? ` (Quality: ${validationResult.quality_score}%)` : ''}.
-              {validationResult?.session_id ? ` Session ID: ${validationResult.session_id}` : ''}
-            </p>
+            <strong>Photo accepted</strong>
+            <p>Your photo is ready for the live check.</p>
           </div>
           <button className="btn-small-link" onClick={handleRetake}>
-            Change Photo
+            Retake
           </button>
         </div>
       )}

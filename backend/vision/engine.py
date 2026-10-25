@@ -93,7 +93,7 @@ def assess_quality(image: np.ndarray, face_box: Optional[Dict[str, int]] = None)
         img_area = w * h
         face_ratio = face_area / float(img_area)
         if face_ratio < config.REF_MIN_FACE_RATIO or fw < config.REF_MIN_FACE_PX or fh < config.REF_MIN_FACE_PX:
-            issues.append("Face is too small or too far from the camera. Please move closer.")
+            issues.append("Face is too small or too far from the camera. Move closer.")
     else:
         face_crop = image
 
@@ -104,13 +104,13 @@ def assess_quality(image: np.ndarray, face_box: Optional[Dict[str, int]] = None)
 
     laplacian_var = float(cv2.Laplacian(face_gray, cv2.CV_64F).var())
     if laplacian_var < config.REF_MIN_SHARPNESS:
-        issues.append(f"Face is blurry (sharpness: {laplacian_var:.1f}, min: {config.REF_MIN_SHARPNESS}). Please hold still and refocus.")
+        issues.append("Face is blurry. Hold still and try again.")
 
     mean_brightness = float(np.mean(face_gray))
     if mean_brightness < config.REF_MIN_BRIGHTNESS:
-        issues.append(f"Face lighting is too dark (brightness: {mean_brightness:.1f}/255, min: {config.REF_MIN_BRIGHTNESS}). Please face a light source.")
+        issues.append("Face lighting is too dark. Face a light source.")
     elif mean_brightness > config.REF_MAX_BRIGHTNESS:
-        issues.append(f"Face lighting is overexposed (brightness: {mean_brightness:.1f}/255, max: {config.REF_MAX_BRIGHTNESS}). Please reduce direct glare.")
+        issues.append("Face lighting is too bright. Reduce direct glare.")
 
     sharpness_score = min(60.0, (laplacian_var / 120) * 60.0)
     brightness_score = 40.0 - abs(mean_brightness - 128.0) * (40.0 / 128.0)
@@ -177,7 +177,7 @@ class VisionEngine:
                     "success": False,
                     "faces_detected": 0,
                     "issues": ["No face detected"],
-                    "message": "No face detected. Please ensure your face is well-lit and directly facing the webcam."
+                    "message": "No face detected. Look directly at the camera in good lighting."
                 }
 
             if count > 1:
@@ -185,7 +185,7 @@ class VisionEngine:
                     "success": False,
                     "faces_detected": count,
                     "issues": [f"Multiple faces detected ({count})"],
-                    "message": f"Multiple faces detected ({count}). Only one person should be present in the photo."
+                    "message": f"Multiple faces detected ({count}). Only one person should be in the photo."
                 }
 
             face_box = row_to_box(main, w, h)
@@ -195,14 +195,14 @@ class VisionEngine:
             mesh_results = self.mesh.process(rgb)
             landmarks = pick_landmarks(mesh_results, face_box, w, h)
             if landmarks is None:
-                issues.append("Could not detect facial landmarks. Ensure face is unobstructed and facing camera.")
+                issues.append("Could not detect face landmarks. Look straight at the camera.")
             else:
                 pitch, yaw, _ = estimate_head_pose(landmarks, w, h)
                 if abs(yaw) > config.REF_MAX_POSE_DEG or abs(pitch) > config.REF_MAX_POSE_DEG:
-                    issues.append(f"Face is turned away (yaw: {yaw:.1f}°, pitch: {pitch:.1f}°, maximum ±{config.REF_MAX_POSE_DEG}°). Please look straight at the camera.")
+                    issues.append("Face is turned away. Look straight at the camera.")
                 _, _, openness, eyes_open = estimate_eyes(landmarks)
                 if not eyes_open:
-                    issues.append(f"Eyes appear closed or blinking (openness: {openness:.2f}, min: {config.EYES_OPEN_MIN}). Please keep eyes open.")
+                    issues.append("Eyes appear closed. Keep your eyes open.")
 
             if len(issues) > 0:
                 return {
@@ -210,7 +210,7 @@ class VisionEngine:
                     "faces_detected": 1,
                     "quality_score": quality_score,
                     "issues": issues,
-                    "message": f"Reference photo rejected: {'; '.join(issues)}"
+                    "message": f"Photo not accepted: {'; '.join(issues)}"
                 }
 
             embedding = self.face.embed(image, main)
@@ -228,7 +228,7 @@ class VisionEngine:
                     "quality_score": quality_score,
                     "issues": issues
                 },
-                "message": "Reference face successfully validated and embedding generated."
+                "message": "Photo accepted."
             }
 
 
