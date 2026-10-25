@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { API_BASE } from '../config';
 import '../css/LiveVerification.css';
 
@@ -10,7 +10,6 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
   const isProcessingRef = useRef(false);
   const intervalRef = useRef(null);
 
-  const [isCameraActive, setIsCameraActive] = useState(false);
   const [error, setError] = useState(null);
   const [latestFrame, setLatestFrame] = useState(null);
   const [events, setEvents] = useState([]);
@@ -39,7 +38,100 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
-    setIsCameraActive(false);
+  }, []);
+
+  const addLocalEvent = useCallback((title, detail, level) => {
+    setEvents((prev) => {
+      const timeStr = new Date().toLocaleTimeString();
+      const last = prev[0];
+      if (last && last.title === title && Date.now() - last.ts < 2500) {
+        return prev; // Debounce repetitive frame events in UI
+      }
+      const newEvt = { id: Math.random().toString(), time: timeStr, title, detail, level, ts: Date.now() };
+      return [newEvt, ...prev.slice(0, 40)];
+    });
+  }, []);
+
+  // Draw overlay bounding box on top of the live stream
+  const drawOverlay = useCallback((frameData, vidW, vidH, sentW, sentH) => {
+    const overlay = overlayCanvasRef.current;
+    if (!overlay) return;
+
+    overlay.width = vidW;
+    overlay.height = vidH;
+    const ctx = overlay.getContext('2d');
+    ctx.clearRect(0, 0, vidW, vidH);
+
+    if (frameData.face_box) {
+      const fb = frameData.face_box;
+      const scaleX = sentW ? vidW / sentW : 1.0;
+      const scaleY = sentH ? vidH / sentH : 1.0;
+
+      const x = fb.x * scaleX;
+      const y = fb.y * scaleY;
+      const width = fb.width * scaleX;
+      const height = fb.height * scaleY;
+
+      // Because the <video> element is mirrored in the UI via CSS (transform: scaleX(-1))
+      // for a natural mirror-view user experience, map raw camera box X to screen display X (L4):
+      const displayX = vidW - (x + width);
+
+      let strokeColor = '#10B981'; // Green for match & center
+      let statusText = 'VERIFIED MATCH';
+
+      if (frameData.verification_status === 'NO_MATCH') {
+        strokeColor = '#EF4444';
+        statusText = 'NO MATCH';
+      } else if (frameData.verification_status === 'UNKNOWN') {
+        strokeColor = '#F59E0B';
+        statusText = 'HEAD TURNED • UNCERTAIN';
+      } else if (frameData.verification_status === 'MULTIPLE_FACES') {
+        strokeColor = '#DC2626';
+        statusText = 'MULTIPLE FACES';
+      } else if (frameData.is_looking_away === true) {
+        strokeColor = '#F59E0B';
+        statusText = `MATCH • ${frameData.gaze_direction ? frameData.gaze_direction.replace('_', ' ') : 'LOOKING AWAY'}`;
+      }
+
+      // Rounded Bounding Box
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = strokeColor;
+      ctx.strokeRect(displayX, y, width, height);
+
+      // Corner Accents
+      const cLen = Math.min(24, width * 0.2);
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      // Top-Left
+      ctx.moveTo(displayX, y + cLen);
+      ctx.lineTo(displayX, y);
+      ctx.lineTo(displayX + cLen, y);
+      // Top-Right
+      ctx.moveTo(displayX + width - cLen, y);
+      ctx.lineTo(displayX + width, y);
+      ctx.lineTo(displayX + width, y + cLen);
+      // Bottom-Left
+      ctx.moveTo(displayX, y + height - cLen);
+      ctx.lineTo(displayX, y + height);
+      ctx.lineTo(displayX + cLen, y + height);
+      // Bottom-Right
+      ctx.moveTo(displayX + width - cLen, y + height);
+      ctx.lineTo(displayX + width, y + height);
+      ctx.lineTo(displayX + width, y + height - cLen);
+      ctx.stroke();
+
+      // Label background & text (drawn in unmirrored canvas space so text remains readable)
+      const simText = frameData.similarity !== null ? ` ${(frameData.similarity * 100).toFixed(0)}%` : '';
+      const label = `${statusText}${simText}`;
+      ctx.font = 'bold 13px Inter, sans-serif';
+      const textWidth = ctx.measureText(label).width;
+
+      ctx.fillStyle = strokeColor;
+      ctx.fillRect(displayX, Math.max(0, y - 26), textWidth + 16, 26);
+
+      ctx.fillStyle = '#FFFFFF';
+      ctx.fillText(label, displayX + 8, Math.max(16, y - 8));
+    }
   }, []);
 
   // Send a live video frame to backend
@@ -154,101 +246,7 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
     } finally {
       isProcessingRef.current = false;
     }
-  }, [sessionId]);
-
-  const addLocalEvent = (title, detail, level) => {
-    setEvents((prev) => {
-      const timeStr = new Date().toLocaleTimeString();
-      const last = prev[0];
-      if (last && last.title === title && Date.now() - last.ts < 2500) {
-        return prev; // Debounce repetitive frame events in UI
-      }
-      const newEvt = { id: Math.random().toString(), time: timeStr, title, detail, level, ts: Date.now() };
-      return [newEvt, ...prev.slice(0, 40)];
-    });
-  };
-
-  // Draw overlay bounding box on top of the live stream
-  const drawOverlay = (frameData, vidW, vidH, sentW, sentH) => {
-    const overlay = overlayCanvasRef.current;
-    if (!overlay) return;
-
-    overlay.width = vidW;
-    overlay.height = vidH;
-    const ctx = overlay.getContext('2d');
-    ctx.clearRect(0, 0, vidW, vidH);
-
-    if (frameData.face_box) {
-      const fb = frameData.face_box;
-      const scaleX = sentW ? vidW / sentW : 1.0;
-      const scaleY = sentH ? vidH / sentH : 1.0;
-
-      const x = fb.x * scaleX;
-      const y = fb.y * scaleY;
-      const width = fb.width * scaleX;
-      const height = fb.height * scaleY;
-
-      // Because the <video> element is mirrored in the UI via CSS (transform: scaleX(-1))
-      // for a natural mirror-view user experience, map raw camera box X to screen display X (L4):
-      const displayX = vidW - (x + width);
-
-      let strokeColor = '#10B981'; // Green for match & center
-      let statusText = 'VERIFIED MATCH';
-
-      if (frameData.verification_status === 'NO_MATCH') {
-        strokeColor = '#EF4444';
-        statusText = 'NO MATCH';
-      } else if (frameData.verification_status === 'UNKNOWN') {
-        strokeColor = '#F59E0B';
-        statusText = 'HEAD TURNED • UNCERTAIN';
-      } else if (frameData.verification_status === 'MULTIPLE_FACES') {
-        strokeColor = '#DC2626';
-        statusText = 'MULTIPLE FACES';
-      } else if (frameData.is_looking_away === true) {
-        strokeColor = '#F59E0B';
-        statusText = `MATCH • ${frameData.gaze_direction ? frameData.gaze_direction.replace('_', ' ') : 'LOOKING AWAY'}`;
-      }
-
-      // Rounded Bounding Box
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = strokeColor;
-      ctx.strokeRect(displayX, y, width, height);
-
-      // Corner Accents
-      const cLen = Math.min(24, width * 0.2);
-      ctx.lineWidth = 5;
-      ctx.beginPath();
-      // Top-Left
-      ctx.moveTo(displayX, y + cLen);
-      ctx.lineTo(displayX, y);
-      ctx.lineTo(displayX + cLen, y);
-      // Top-Right
-      ctx.moveTo(displayX + width - cLen, y);
-      ctx.lineTo(displayX + width, y);
-      ctx.lineTo(displayX + width, y + cLen);
-      // Bottom-Left
-      ctx.moveTo(displayX, y + height - cLen);
-      ctx.lineTo(displayX, y + height);
-      ctx.lineTo(displayX + cLen, y + height);
-      // Bottom-Right
-      ctx.moveTo(displayX + width - cLen, y + height);
-      ctx.lineTo(displayX + width, y + height);
-      ctx.lineTo(displayX + width, y + height - cLen);
-      ctx.stroke();
-
-      // Label background & text (drawn in unmirrored canvas space so text remains readable)
-      const simText = frameData.similarity !== null ? ` ${(frameData.similarity * 100).toFixed(0)}%` : '';
-      const label = `${statusText}${simText}`;
-      ctx.font = 'bold 13px Inter, sans-serif';
-      const textWidth = ctx.measureText(label).width;
-
-      ctx.fillStyle = strokeColor;
-      ctx.fillRect(displayX, Math.max(0, y - 26), textWidth + 16, 26);
-
-      ctx.fillStyle = '#FFFFFF';
-      ctx.fillText(label, displayX + 8, Math.max(16, y - 8));
-    }
-  };
+  }, [sessionId, addLocalEvent, drawOverlay]);
 
   // Start Live Verification on component mount
   useEffect(() => {
@@ -288,7 +286,6 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
           videoRef.current.srcObject = stream;
           videoRef.current.onloadedmetadata = () => {
             videoRef.current.play().then(() => {
-              setIsCameraActive(true);
               // Send live frames at ~5 FPS (every 200ms)
               intervalRef.current = setInterval(captureAndSendFrame, 200);
             });

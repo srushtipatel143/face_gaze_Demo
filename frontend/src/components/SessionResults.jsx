@@ -1,4 +1,3 @@
-import React from 'react';
 import '../css/SessionResults.css';
 
 export default function SessionResults({ summary, referencePhoto, onNewSession }) {
