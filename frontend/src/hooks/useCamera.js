@@ -13,32 +13,82 @@ export function useCamera() {
   const [error, setError] = useState(null);
 
   const stop = useCallback(() => {
-    streamRef.current?.getTracks().forEach((t) => t.stop());
-    streamRef.current = null;
-    if (videoRef.current) videoRef.current.srcObject = null;
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
     setStatus('off');
+  }, []);
+
+  const attachStream = useCallback(() => {
+    const video = videoRef.current;
+    const stream = streamRef.current;
+    if (video && stream) {
+      if (video.srcObject !== stream) {
+        video.srcObject = stream;
+      }
+      video.play().catch((err) => {
+        // AbortError is common when play() is called rapidly or interrupted; ignore it
+        if (err.name !== 'AbortError') {
+          console.warn('Video play warning:', err);
+        }
+      });
+    }
   }, []);
 
   const start = useCallback(async () => {
     setError(null);
     setStatus('starting');
     try {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((t) => t.stop());
+        streamRef.current = null;
+      }
+
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
         audio: false,
       });
+
       streamRef.current = stream;
+      setStatus('on');
+
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        await videoRef.current.play();
+        try {
+          await videoRef.current.play();
+        } catch (playErr) {
+          if (playErr.name !== 'AbortError') {
+            console.warn('Initial play warning:', playErr);
+          }
+        }
       }
-      setStatus('on');
     } catch (err) {
+      console.error('Camera start error:', err);
       setError(ERRORS[err.name] || 'Could not start the camera.');
       setStatus('error');
     }
   }, []);
 
-  useEffect(() => stop, [stop]);
+  // Ensure stream is bound whenever video element mounts or status turns on
+  useEffect(() => {
+    if (status === 'on') {
+      attachStream();
+    }
+  });
+
+  // Stop media tracks when the hook unmounts from DOM
+  useEffect(() => {
+    return () => {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((t) => t.stop());
+        streamRef.current = null;
+      }
+    };
+  }, []);
+
   return { videoRef, status, error, start, stop };
 }

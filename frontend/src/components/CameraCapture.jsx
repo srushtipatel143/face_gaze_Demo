@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   Camera,
   RotateCcw,
@@ -37,12 +37,19 @@ export default function CameraCapture({
     initialReference?.photo || confirmedPhoto || null
   );
   const [stepState, setStepState] = useState(
-    initialReference?.photo || confirmedPhoto ? 'accepted' : 'off'
+    initialReference?.photo || confirmedPhoto ? 'accepted' : 'live'
   );
   const [checks, setChecks] = useState(
     initialReference?.checks || DEFAULT_CHECKS
   );
   const [networkError, setNetworkError] = useState(null);
+
+  // Auto-start camera when landing on reference screen without photo
+  useEffect(() => {
+    if (!initialReference?.photo && !confirmedPhoto) {
+      startCamera();
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleTurnOnCamera = async () => {
     setCapturedPhoto(null);
@@ -129,8 +136,8 @@ export default function CameraCapture({
     }
   };
 
-  const isLive = stepState === 'live' && cameraStatus === 'on';
-  const isCameraOff = (stepState === 'off' || cameraStatus === 'off') && !capturedPhoto;
+  const isLive = stepState === 'live';
+  const isCameraOff = (stepState === 'off' || cameraStatus === 'off') && !capturedPhoto && stepState !== 'live';
 
   return (
     <div className="reference-screen">
@@ -144,7 +151,16 @@ export default function CameraCapture({
         </div>
 
         {cameraError && (
-          <Alert tone="danger">{cameraError}</Alert>
+          <Alert
+            tone="danger"
+            action={
+              <Button variant="secondary" size="sm" onClick={startCamera}>
+                Try again
+              </Button>
+            }
+          >
+            {cameraError}
+          </Alert>
         )}
 
         {networkError && (
@@ -180,6 +196,11 @@ export default function CameraCapture({
                 muted
                 className="camera-video"
               />
+              {cameraStatus === 'starting' && (
+                <div className="checking-overlay">
+                  <div className="camera-spinner" aria-label="Starting camera" />
+                </div>
+              )}
               <div className="face-oval-outline" aria-hidden="true" />
             </>
           ) : (
@@ -208,9 +229,10 @@ export default function CameraCapture({
               variant="primary"
               icon={Camera}
               onClick={handleCapture}
+              disabled={cameraStatus !== 'on'}
               id="btn-take-photo"
             >
-              Take photo
+              {cameraStatus === 'starting' ? 'Starting camera…' : 'Take photo'}
             </Button>
           )}
 

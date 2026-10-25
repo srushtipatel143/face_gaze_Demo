@@ -358,7 +358,16 @@ export default function LiveVerification({
       )}
 
       {camera.error && (
-        <Alert tone="danger">{camera.error}</Alert>
+        <Alert
+          tone="danger"
+          action={
+            <Button variant="secondary" size="sm" onClick={camera.start}>
+              Try again
+            </Button>
+          }
+        >
+          {camera.error}
+        </Alert>
       )}
 
       {connectionWarning && !fatalSessionEnded && (
