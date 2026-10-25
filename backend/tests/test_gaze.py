@@ -24,35 +24,45 @@ def test_classify_gaze_directions():
     assert dir_right == LOOKING_RIGHT
     assert away_right is True
 
-    # 3. Pitch -20 degrees -> DOWN
-    dir_down, away_down = classify_gaze(yaw=0.0, pitch=-20.0, iris_h=0.5, iris_v=0.5, baseline=base)
+    # 3. Pitch +20 degrees -> DOWN
+    dir_down, away_down = classify_gaze(yaw=0.0, pitch=20.0, iris_h=0.5, iris_v=0.5, baseline=base)
     assert dir_down == LOOKING_DOWN
     assert away_down is True
 
-    # 4. Pitch +20 degrees -> UP
-    dir_up, away_up = classify_gaze(yaw=0.0, pitch=20.0, iris_h=0.5, iris_v=0.5, baseline=base)
+    # 4. Pitch -20 degrees -> UP
+    dir_up, away_up = classify_gaze(yaw=0.0, pitch=-20.0, iris_h=0.5, iris_v=0.5, baseline=base)
     assert dir_up == LOOKING_UP
     assert away_up is True
 
     # 5. Small deltas (natural jitter) -> CENTER
-    dir_center, away_center = classify_gaze(yaw=2.0, pitch=-1.5, iris_h=0.52, iris_v=0.48, baseline=base)
+    dir_center, away_center = classify_gaze(yaw=2.0, pitch=1.5, iris_h=0.52, iris_v=0.48, baseline=base)
     assert dir_center == CENTER
     assert away_center is False
 
 
 def test_classify_gaze_soft_thresholds():
-    """Soft pitch thresholds combined with iris vertical deviation."""
+    """Soft pitch thresholds combined with iris vertical deviation, and pure iris gaze."""
     base = {"yaw": 0.0, "pitch": 0.0, "iris_h": 0.5, "iris_v": 0.5}
 
-    # Soft down: pitch -9.0 (< -8.0) and iris_v 0.68 (delta 0.18 > 0.16)
-    dir_s_down, away_s_down = classify_gaze(yaw=0.0, pitch=-9.0, iris_h=0.5, iris_v=0.68, baseline=base)
+    # Soft down: pitch 9.0 (> 8.0) and iris_v 0.60 (delta 0.10 > 0.08)
+    dir_s_down, away_s_down = classify_gaze(yaw=0.0, pitch=9.0, iris_h=0.5, iris_v=0.60, baseline=base)
     assert dir_s_down == LOOKING_DOWN
     assert away_s_down is True
 
-    # Soft up: pitch 11.0 (> 10.0) and iris_v 0.32 (delta -0.18 < -0.16)
-    dir_s_up, away_s_up = classify_gaze(yaw=0.0, pitch=11.0, iris_h=0.5, iris_v=0.32, baseline=base)
+    # Soft up: pitch -11.0 (< -10.0) and iris_v 0.40 (delta -0.10 < -0.08)
+    dir_s_up, away_s_up = classify_gaze(yaw=0.0, pitch=-11.0, iris_h=0.5, iris_v=0.40, baseline=base)
     assert dir_s_up == LOOKING_UP
     assert away_s_up is True
+
+    # Pure iris down (no head pitch movement) -> DOWN
+    dir_i_down, away_i_down = classify_gaze(yaw=0.0, pitch=0.0, iris_h=0.5, iris_v=0.68, baseline=base)
+    assert dir_i_down == LOOKING_DOWN
+    assert away_i_down is True
+
+    # Pure iris up (no head pitch movement) -> UP
+    dir_i_up, away_i_up = classify_gaze(yaw=0.0, pitch=0.0, iris_h=0.5, iris_v=0.32, baseline=base)
+    assert dir_i_up == LOOKING_UP
+    assert away_i_up is True
 
 
 def test_baseline_completes_after_time_and_samples():

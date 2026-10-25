@@ -128,11 +128,11 @@ def classify_gaze(yaw: float, pitch: float, iris_h: float, iris_v: float,
         return LOOKING_LEFT, True
     if d_yaw > config.GAZE_YAW_AWAY_DEG or d_ih < -config.GAZE_IRIS_H_AWAY:
         return LOOKING_RIGHT, True
-    if d_pitch < -config.GAZE_PITCH_DOWN_DEG or (
-            d_pitch < -config.GAZE_PITCH_DOWN_SOFT_DEG and d_iv > config.GAZE_IRIS_V_DOWN):
+    if d_pitch > config.GAZE_PITCH_DOWN_DEG or d_iv > config.GAZE_IRIS_V_DOWN or (
+            d_pitch > config.GAZE_PITCH_DOWN_SOFT_DEG and d_iv > (config.GAZE_IRIS_V_DOWN * 0.5)):
         return LOOKING_DOWN, True
-    if d_pitch > config.GAZE_PITCH_UP_DEG or (
-            d_pitch > config.GAZE_PITCH_UP_SOFT_DEG and d_iv < -config.GAZE_IRIS_V_UP):
+    if d_pitch < -config.GAZE_PITCH_UP_DEG or d_iv < -config.GAZE_IRIS_V_UP or (
+            d_pitch < -config.GAZE_PITCH_UP_SOFT_DEG and d_iv < -(config.GAZE_IRIS_V_UP * 0.5)):
         return LOOKING_UP, True
     return CENTER, False
 
