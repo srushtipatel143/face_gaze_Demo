@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 import config
 from vision.face import select_faces
 from vision.engine import pick_landmarks
+from vision.gaze import GazeBaseline
 
 
 def test_select_faces_ignores_small_background():
@@ -92,3 +93,62 @@ def test_pick_landmarks_no_faces():
     box = {"x": 100, "y": 100, "width": 100, "height": 100}
     mesh_results = SimpleNamespace(multi_face_landmarks=None)
     assert pick_landmarks(mesh_results, box, 640, 480) is None
+
+
+def test_baseline_completes_after_time_and_samples():
+    """Calibration completes only when both CALIBRATION_SECONDS and CALIBRATION_MIN_SAMPLES are satisfied."""
+    baseline = GazeBaseline()
+    assert not baseline.ready
+    assert baseline.progress(0.0) == 0.0
+
+    # Add 19 samples over 4.75 seconds (insufficient samples and insufficient time)
+    for i in range(19):
+        t = i * 0.25
+        baseline.add_calibration_sample(t, yaw=1.0, pitch=-2.0, iris_h=0.5, iris_v=0.5)
+        assert not baseline.ready
+        assert baseline.progress(t) < 1.0
+
+    # Add 20th sample at t=4.9s (samples reached 20, but time < 5.0s)
+    baseline.add_calibration_sample(4.9, yaw=1.0, pitch=-2.0, iris_h=0.5, iris_v=0.5)
+    assert not baseline.ready
+    assert baseline.progress(4.9) < 1.0
+
+    # Add 21st sample at t=5.1s (both time >= 5.0s and samples >= 20 met)
+    baseline.add_calibration_sample(5.1, yaw=1.0, pitch=-2.0, iris_h=0.5, iris_v=0.5)
+    assert baseline.ready
+    assert baseline.progress(5.1) == 1.0
+    assert baseline.values == {"yaw": 1.0, "pitch": -2.0, "iris_h": 0.5, "iris_v": 0.5}
+    assert baseline.unstable is False
+    assert baseline.summary() == {"completed": True, "unstable": False}
+
+
+def test_baseline_trailing_ignores_away():
+    """After calibration, on-screen samples update the trailing window while away samples are ignored."""
+    baseline = GazeBaseline()
+
+    # Pre-calibration: on-screen samples should be ignored
+    baseline.add_on_screen_sample(yaw=5.0, pitch=5.0, iris_h=0.5, iris_v=0.5)
+    assert len(baseline.trailing) == 0
+
+    # Complete calibration with yaw=0.0, pitch=0.0
+    for i in range(25):
+        t = i * 0.25
+        baseline.add_calibration_sample(t, yaw=0.0, pitch=0.0, iris_h=0.5, iris_v=0.5)
+
+    assert baseline.ready
+    assert baseline.values["yaw"] == 0.0
+
+    # Away samples should never enter the trailing baseline window (caller filters them)
+    # Simulate on-screen samples with a shifted center (e.g. user shifted posture slightly: yaw=3.0)
+    window_size = config.TRAILING_BASELINE_WINDOW
+    for _ in range(window_size - 1):
+        baseline.add_on_screen_sample(yaw=3.0, pitch=1.0, iris_h=0.52, iris_v=0.48)
+        # Window not full yet, values remain calibrated values
+        assert baseline.values["yaw"] == 0.0
+
+    # Adding the final sample fills the trailing window and updates baseline to new median
+    baseline.add_on_screen_sample(yaw=3.0, pitch=1.0, iris_h=0.52, iris_v=0.48)
+    assert len(baseline.trailing) == window_size
+    assert baseline.values["yaw"] == 3.0
+    assert baseline.values["pitch"] == 1.0
+

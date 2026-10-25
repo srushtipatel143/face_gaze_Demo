@@ -1,3 +1,5 @@
+from collections import deque
+import statistics
 from typing import Dict, Optional, Tuple
 
 import cv2
@@ -133,3 +135,59 @@ def classify_gaze(yaw: float, pitch: float, iris_h: float, iris_v: float,
             d_pitch > config.GAZE_PITCH_UP_SOFT_DEG and d_iv < -config.GAZE_IRIS_V_UP):
         return LOOKING_UP, True
     return CENTER, False
+
+
+def _median_values(samples) -> Dict[str, float]:
+    return {
+        "yaw": round(statistics.median(s[0] for s in samples), 2),
+        "pitch": round(statistics.median(s[1] for s in samples), 2),
+        "iris_h": round(statistics.median(s[2] for s in samples), 3),
+        "iris_v": round(statistics.median(s[3] for s in samples), 3),
+    }
+
+
+class GazeBaseline:
+    def __init__(self) -> None:
+        self.samples = []                     # (yaw, pitch, iris_h, iris_v) during calibration
+        self.first_t: Optional[float] = None
+        self.values: Optional[Dict[str, float]] = None
+        self.unstable = False
+        self.trailing = deque(maxlen=config.TRAILING_BASELINE_WINDOW)
+
+    @property
+    def ready(self) -> bool:
+        return self.values is not None
+
+    def progress(self, t_s: float) -> float:
+        if self.ready:
+            return 1.0
+        if self.first_t is None:
+            return 0.0
+        time_part = min(1.0, (t_s - self.first_t) / config.CALIBRATION_SECONDS)
+        count_part = min(1.0, len(self.samples) / config.CALIBRATION_MIN_SAMPLES)
+        return round(min(time_part, count_part), 2)
+
+    def add_calibration_sample(self, t_s, yaw, pitch, iris_h, iris_v) -> None:
+        if self.ready:
+            return
+        if self.first_t is None:
+            self.first_t = t_s
+        self.samples.append((yaw, pitch, iris_h, iris_v))
+        if (t_s - self.first_t >= config.CALIBRATION_SECONDS
+                and len(self.samples) >= config.CALIBRATION_MIN_SAMPLES):
+            self.values = _median_values(self.samples)
+            yaw_std = float(np.std([s[0] for s in self.samples]))
+            pitch_std = float(np.std([s[1] for s in self.samples]))
+            self.unstable = (yaw_std > config.CALIBRATION_MAX_STD_DEG
+                             or pitch_std > config.CALIBRATION_MAX_STD_DEG)
+
+    def add_on_screen_sample(self, yaw, pitch, iris_h, iris_v) -> None:
+        if not self.ready:
+            return
+        self.trailing.append((yaw, pitch, iris_h, iris_v))
+        if len(self.trailing) == self.trailing.maxlen:
+            self.values = _median_values(self.trailing)
+
+    def summary(self) -> Dict[str, bool]:
+        return {"completed": self.ready, "unstable": self.unstable}
+
