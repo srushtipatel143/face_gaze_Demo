@@ -27,7 +27,50 @@ from models.schemas import (
     SessionSummaryResponse,
     BoundingBox
 )
-from vision_engine import engine
+from dataclasses import asdict
+from typing import Optional, Dict, Any
+from records import FrameAnalysis, MATCH
+from vision.engine import engine, decode_base64_image
+from vision.gaze import classify_gaze
+
+
+def _legacy_result(analysis: FrameAnalysis, baseline: Optional[Dict[str, float]]) -> Dict[str, Any]:
+    if analysis.faces_detected == 0 or analysis.faces_detected > 1:
+        gaze_direction = "UNKNOWN"
+        is_looking_away = None
+        calibrating = False
+    elif analysis.yaw is None or analysis.pitch is None or analysis.iris_h is None or analysis.iris_v is None:
+        gaze_direction = "UNKNOWN"
+        is_looking_away = None
+        calibrating = False
+    elif not analysis.eyes_open:
+        gaze_direction = "UNKNOWN"
+        is_looking_away = None
+        calibrating = False
+    elif baseline is None:
+        gaze_direction = "CALIBRATING"
+        is_looking_away = None
+        calibrating = True
+    else:
+        gaze_direction, is_looking_away = classify_gaze(
+            analysis.yaw, analysis.pitch, analysis.iris_h, analysis.iris_v, baseline
+        )
+        calibrating = False
+
+    thumb = analysis.thumbnail if (analysis.identity != MATCH or is_looking_away is True) else None
+
+    res = asdict(analysis)
+    res.update({
+        "verification_status": analysis.identity,
+        "is_match": analysis.identity == MATCH,
+        "gaze_yaw": analysis.yaw,
+        "gaze_pitch": analysis.pitch,
+        "gaze_direction": gaze_direction,
+        "is_looking_away": is_looking_away,
+        "calibrating": calibrating,
+        "thumbnail": thumb,
+    })
+    return res
 
 app = FastAPI(
     title="Face Verification & Eye-Gaze Tracking API",
@@ -94,7 +137,7 @@ def receive_reference_photo(req: ReferencePhotoRequest):
     db.cleanup_old_sessions()
 
     try:
-        image = engine.decode_base64_image(req.image)
+        image = decode_base64_image(req.image)
     except Exception as e:
         return ReferenceResponse(
             success=False,
@@ -103,7 +146,7 @@ def receive_reference_photo(req: ReferencePhotoRequest):
             message=f"Invalid image format: {str(e)}"
         )
 
-    res = engine.process_reference_image(image)
+    res = engine.analyze_reference(image)
 
     if not res.get("success", False):
         return ReferenceResponse(
@@ -184,7 +227,7 @@ def analyze_live_frame(req: FrameVerificationRequest):
         )
 
     try:
-        frame_image = engine.decode_base64_image(req.image)
+        frame_image = decode_base64_image(req.image)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -193,7 +236,8 @@ def analyze_live_frame(req: FrameVerificationRequest):
 
     ref_embedding = sess["reference_embedding"]
     baseline = sess.get("baseline")
-    result = engine.process_live_frame(frame_image, ref_embedding, baseline=baseline)
+    analysis = engine.analyze_frame(frame_image, ref_embedding)
+    result = _legacy_result(analysis, baseline)
 
     # Record metrics and detect state change events in session database
     db.add_frame_result(req.session_id, result)
