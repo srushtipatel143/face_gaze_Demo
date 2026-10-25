@@ -1,5 +1,5 @@
 import React from 'react';
-import './SessionResults.css';
+import '../css/SessionResults.css';
 
 export default function SessionResults({ summary, referencePhoto, onNewSession }) {
   if (!summary) {

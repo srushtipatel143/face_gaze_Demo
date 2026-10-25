@@ -399,12 +399,13 @@ class VisionEngine:
         elif delta_yaw > 20.0 or delta_iris_h < -0.15:
             direction = "LOOKING_RIGHT"
             is_looking_away = True
-        # Vertical check: pitch positive = looking up, pitch negative = looking down
-        # Looking down gets a tighter limit (e.g. 15° below baseline) as people look at phones/notes
-        elif delta_pitch < -15.0 or (delta_pitch < -8.0 and delta_iris_v > 0.16):
+        # Vertical check:
+        # Looking down: head nods down (delta_pitch > 0 in SolvePnP) or irises shift down (+Y, delta_iris_v > 0)
+        # Looking up: head tilts up (delta_pitch < 0 in SolvePnP) or irises shift up (-Y, delta_iris_v < 0)
+        elif delta_pitch > 15.0 or (delta_pitch > 8.0 and delta_iris_v > 0.16):
             direction = "LOOKING_DOWN"
             is_looking_away = True
-        elif delta_pitch > 18.0 or (delta_pitch > 10.0 and delta_iris_v < -0.16):
+        elif delta_pitch < -18.0 or (delta_pitch < -10.0 and delta_iris_v < -0.16):
             direction = "LOOKING_UP"
             is_looking_away = True
 

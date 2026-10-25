@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { API_BASE } from './config';
-import './CameraCapture.css';
+import { API_BASE } from '../config';
+import '../css/CameraCapture.css';
 
 /**
  * CameraCapture component for Phase 1: Reference Photo Capture

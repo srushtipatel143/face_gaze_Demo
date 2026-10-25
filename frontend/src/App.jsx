@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import CameraCapture from './CameraCapture';
-import LiveVerification from './LiveVerification';
-import SessionResults from './SessionResults';
+import CameraCapture from './components/CameraCapture';
+import LiveVerification from './components/LiveVerification';
+import SessionResults from './components/SessionResults';
 import { API_BASE } from './config';
-import './App.css';
+import './css/App.css';
 
 export default function App() {
   // Navigation / Phase state: 'capture' | 'live' | 'results'
