@@ -281,14 +281,24 @@ export default function CameraCapture({
           )}
 
           {stepState === 'accepted' && (
-            <Button
-              variant="secondary"
-              icon={RotateCcw}
-              onClick={handleRetake}
-              id="btn-retake-photo"
-            >
-              Retake
-            </Button>
+            <>
+              <Button
+                variant="secondary"
+                icon={RotateCcw}
+                onClick={handleRetake}
+                id="btn-retake-photo"
+              >
+                Retake
+              </Button>
+              <Button
+                variant="primary"
+                icon={Play}
+                onClick={onStartLive}
+                id="btn-start-live-check-main"
+              >
+                Start live check
+              </Button>
+            </>
           )}
         </div>
       </div>
