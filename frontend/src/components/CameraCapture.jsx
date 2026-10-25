@@ -215,12 +215,11 @@ export default function CameraCapture({
                 muted
                 className="camera-video"
               />
-              {cameraStatus === 'starting' && (
-                <div className="checking-overlay">
-                  <div className="camera-spinner" aria-label="Starting camera" />
-                </div>
-              )}
-              <div className="face-oval-outline" aria-hidden="true" />
+              <div className="face-oval-outline" aria-hidden="true">
+                {cameraStatus === 'starting' && (
+                  <div className="oval-spinner" aria-label="Starting camera" />
+                )}
+              </div>
             </>
           ) : (
             <div className="camera-off-state">
