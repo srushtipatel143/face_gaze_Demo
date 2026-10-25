@@ -15,7 +15,9 @@ from db_models import (
     VerificationFailure,
     save_reference_session,
     save_failure_proof,
-    save_session_results,
+    save_report,
+    list_sessions,
+    get_report,
     get_session_from_db,
     get_session_failures
 )
@@ -92,36 +94,84 @@ def test_save_failure_proof_images():
     assert failures[1]["proof_image"] == proof_img_2
 
 
-def test_save_session_final_results():
+from records import FrameRecord
+
+
+def test_save_report_and_history():
     session_id = "sess_test_complete_789"
     save_reference_session(session_id=session_id, reference_image="data:image/jpeg;base64,ref")
 
-    summary = {
+    report = {
+        "session_id": session_id,
         "status": "completed",
-        "duration_seconds": 15.5,
+        "rules_version": "2026.10.1",
+        "duration_s": 15.5,
         "total_frames": 75,
-        "matched_frames": 60,
-        "unmatched_frames": 10,
-        "no_face_frames": 5,
-        "multiple_faces_frames": 0,
-        "match_percentage": 80.0,
-        "looking_away_percentage": 13.3,
         "face": {"verdict": "FAIL", "reasons": ["excessive_different_person"]},
         "gaze": {"verdict": "PASS", "reasons": []},
-        "overall_verdict": "FAIL",
-        "metrics": {"fps": 5.0, "away_s": 2.0},
+        "overall_verdict": "FAILED",
+        "metrics": {
+            "fps": 5.0,
+            "period_s": 0.2,
+            "matched_frames": 60,
+            "unmatched_frames": 10,
+            "identity_unknown_frames": 0,
+            "no_face_frames": 5,
+            "multiple_faces_frames": 0,
+            "match_pct": 80.0,
+            "different_person_s": 2.0,
+            "multiple_faces_s": 0.0,
+            "no_face_s": 1.0,
+            "no_face_pct": 6.5,
+            "identity_unknown_pct": 0.0,
+            "gaze_valid_frames": 60,
+            "gaze_unknown_frames": 0,
+            "gaze_valid_s": 12.0,
+            "away_s": 2.0,
+            "away_pct": 13.3,
+            "time_on_screen_pct": 86.7,
+            "away_by_direction_s": {"LEFT": 2.0, "RIGHT": 0.0, "UP": 0.0, "DOWN": 0.0},
+            "long_away_intervals": 0,
+            "long_away_threshold_s": 10.0,
+            "gaze_unknown_pct": 0.0,
+            "calibration": {"completed": True, "unstable": False, "post_calibration_away": False},
+            "blink_count": 2,
+            "static_face": False,
+            "similarity": {"threshold": 0.363, "count": 70, "min": 0.1, "p05": 0.2, "median": 0.8, "max": 0.95, "near_threshold_frames": 2},
+        },
         "intervals": [
             {
+                "id": "different_person-1",
                 "type": "different_person",
-                "start_t": 5.0,
-                "end_t": 7.0,
-                "details": "Different person detected",
-                "thumbnail": "data:image/jpeg;base64,intervalthumb"
+                "start_s": 5.0,
+                "end_s": 7.0,
+                "duration_s": 2.0,
+                "direction": None,
+                "message": "Different person in view",
+                "thumbnail": "data:image/jpeg;base64,intervalthumb",
             }
-        ]
+        ],
     }
 
-    saved = save_session_results(session_id, summary)
+    records = [
+        FrameRecord(
+            t_s=0.2,
+            faces_detected=1,
+            identity="MATCH",
+            similarity=0.85,
+            yaw=1.0,
+            pitch=-1.0,
+            iris_h=0.5,
+            iris_v=0.5,
+            eyes_open=True,
+            gaze_direction="CENTER",
+            is_looking_away=False,
+            calibrating=False,
+            thumbnail="data:image/jpeg;base64,thumb_should_be_stripped"
+        )
+    ]
+
+    saved = save_report(session_id, report, records)
     assert saved is True
 
     data = get_session_from_db(session_id)
@@ -131,8 +181,65 @@ def test_save_session_final_results():
     assert data["gaze_verdict"] == "PASS"
     assert data["match_percentage"] == 80.0
     assert "excessive_different_person" in data["verdict_reasons"]
+    assert data["rules_version"] == "2026.10.1"
+    assert data["config_snapshot"] is not None
+    assert isinstance(data["config_snapshot"], dict)
+    assert len(data["records"]) == 1
+    assert "thumbnail" not in data["records"][0]
 
-    # Verify interval thumbnail was persisted as a failure proof
+    # Verify interval thumbnail was persisted as a failure proof with t_s == 5.0
     failures = get_session_failures(session_id)
-    assert len(failures) >= 1
-    assert any(f["proof_image"] == "data:image/jpeg;base64,intervalthumb" for f in failures)
+    assert len(failures) == 1
+    assert failures[0]["proof_image"] == "data:image/jpeg;base64,intervalthumb"
+    assert failures[0]["failure_type"] == "DIFFERENT_PERSON"
+    assert failures[0]["t_s"] == 5.0
+
+    # Verify get_report
+    fetched_report = get_report(session_id)
+    assert fetched_report is not None
+    assert fetched_report["session_id"] == session_id
+
+    # Verify list_sessions
+    sessions = list_sessions(limit=10)
+    assert len(sessions) >= 1
+    assert any(s["session_id"] == session_id for s in sessions)
+
+
+def test_save_report_auto_creates_session_if_not_present():
+    """save_report automatically initializes a VerificationSession row if it does not exist."""
+    session_id = "sess_auto_created_999"
+    report = {
+        "session_id": session_id,
+        "status": "completed",
+        "rules_version": "2026.10.1",
+        "duration_s": 5.0,
+        "total_frames": 25,
+        "face": {"verdict": "PASS", "reasons": []},
+        "gaze": {"verdict": "PASS", "reasons": []},
+        "overall_verdict": "PASSED",
+        "metrics": {
+            "fps": 5.0, "period_s": 0.2, "matched_frames": 25, "unmatched_frames": 0,
+            "identity_unknown_frames": 0, "no_face_frames": 0, "multiple_faces_frames": 0,
+            "match_pct": 100.0, "different_person_s": 0.0, "multiple_faces_s": 0.0,
+            "no_face_s": 0.0, "no_face_pct": 0.0, "identity_unknown_pct": 0.0,
+            "gaze_valid_frames": 25, "gaze_unknown_frames": 0, "gaze_valid_s": 5.0,
+            "away_s": 0.0, "away_pct": 0.0, "time_on_screen_pct": 100.0,
+            "away_by_direction_s": {"LEFT": 0.0, "RIGHT": 0.0, "UP": 0.0, "DOWN": 0.0},
+            "long_away_intervals": 0, "long_away_threshold_s": 10.0, "gaze_unknown_pct": 0.0,
+            "calibration": {"completed": True, "unstable": False, "post_calibration_away": False},
+            "blink_count": 0, "static_face": False,
+            "similarity": {"threshold": 0.363, "count": 25, "min": 0.8, "p05": 0.82, "median": 0.9, "max": 0.95, "near_threshold_frames": 0},
+        },
+        "intervals": []
+    }
+
+    saved = save_report(session_id, report, [])
+    assert saved is True
+
+    data = get_session_from_db(session_id)
+    assert data is not None
+    assert data["session_id"] == session_id
+    assert data["status"] == "completed"
+    assert data["overall_verdict"] == "PASSED"
+
+

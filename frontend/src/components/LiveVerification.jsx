@@ -1,263 +1,217 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Square } from 'lucide-react';
+import { useCamera } from '../hooks/useCamera';
+import { Button, Badge, Alert, Disclosure, KeyValue } from './ui';
+import {
+  IDENTITY_STATUS,
+  ATTENTION_STATUS,
+  INTERVAL_TYPE,
+  formatClock,
+  formatSeconds,
+} from '../lib/format';
 import { API_BASE } from '../config';
 import '../css/LiveVerification.css';
 
-export default function LiveVerification({ sessionId, referencePhoto, onStopVerification, onBackToCapture }) {
-  const videoRef = useRef(null);
+const TONE_HEX = {
+  success: '#10b981',
+  danger: '#ef4444',
+  warning: '#f59e0b',
+  neutral: '#94a3b8',
+  info: '#3b82f6',
+};
+
+function mergeEvents(prev, incoming) {
+  if (!incoming || incoming.length === 0) return prev;
+  const result = [...prev];
+  for (const item of incoming) {
+    const idx = result.findIndex((e) => e.id === item.id);
+    if (idx >= 0) {
+      result[idx] = item;
+    } else {
+      result.unshift(item);
+    }
+  }
+  return result.slice(0, 50);
+}
+
+export default function LiveVerification({
+  sessionId,
+  referencePhoto,
+  onStopVerification,
+  onFinished,
+  onBackToCapture,
+}) {
+  const camera = useCamera();
   const canvasRef = useRef(null);
-  const overlayCanvasRef = useRef(null);
-  const streamRef = useRef(null);
+  const overlayRef = useRef(null);
   const isProcessingRef = useRef(false);
   const intervalRef = useRef(null);
-
-  const [isCameraActive, setIsCameraActive] = useState(false);
-  const [error, setError] = useState(null);
-  const [latestFrame, setLatestFrame] = useState(null);
-  const [events, setEvents] = useState([]);
-  const [stats, setStats] = useState({
-    total: 0,
-    matched: 0,
-    unmatched: 0,
-    noFace: 0,
-    lookingAway: 0,
-  });
-  const [isStopping, setIsStopping] = useState(false);
-  const [connectionWarning, setConnectionWarning] = useState(null);
-  const [fatalSessionError, setFatalSessionError] = useState(null);
   const consecutiveFailuresRef = useRef(0);
+  const framesSentRef = useRef(0);
+  const responsesCountRef = useRef(0);
 
-  // Stop camera tracks cleanly
-  const stopCamera = useCallback(() => {
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
-    }
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
-    }
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
-    }
-    setIsCameraActive(false);
-  }, []);
+  const [latest, setLatest] = useState(null);
+  const [events, setEvents] = useState([]);
+  const [connectionWarning, setConnectionWarning] = useState(false);
+  const [fatalSessionEnded, setFatalSessionEnded] = useState(false);
+  const [sessionStarted, setSessionStarted] = useState(false);
+  const [initError, setInitError] = useState(null);
+  const [isStopping, setIsStopping] = useState(false);
+  const [stopError, setStopError] = useState(false);
 
-  // Send a live video frame to backend
-  const captureAndSendFrame = useCallback(async () => {
-    const video = videoRef.current;
+  // Draw face box on overlay canvas
+  const drawOverlay = useCallback((data) => {
+    const overlay = overlayRef.current;
+    const video = camera.videoRef.current;
+    if (!overlay || !video) return;
+
+    const vidW = video.clientWidth || video.videoWidth || 640;
+    const vidH = video.clientHeight || video.videoHeight || 480;
+    overlay.width = vidW;
+    overlay.height = vidH;
+
+    const ctx = overlay.getContext('2d');
+    ctx.clearRect(0, 0, vidW, vidH);
+
+    if (!data?.face_box) return;
+
+    const fb = data.face_box;
+    const rawW = video.videoWidth || 640;
+    const rawH = video.videoHeight || 480;
+    const sentW = Math.min(640, rawW);
+    const sentH = Math.round((sentW / rawW) * rawH);
+
+    const scaleX = vidW / sentW;
+    const scaleY = vidH / sentH;
+
+    const boxW = fb.width * scaleX;
+    const boxH = fb.height * scaleY;
+    const boxX = fb.x * scaleX;
+    const boxY = fb.y * scaleY;
+
+    // Mirrored display: displayX = width - (x + w)
+    const displayX = vidW - (boxX + boxW);
+
+    const identKey = data.live_status?.identity || data.verification_status || 'CHECKING';
+    const identStatus = IDENTITY_STATUS[identKey] || IDENTITY_STATUS.CHECKING;
+    const strokeColor = TONE_HEX[identStatus.tone] || '#10b981';
+    const labelText = identStatus.label;
+
+    // Thin face box (2px)
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = strokeColor;
+    ctx.strokeRect(displayX, boxY, boxW, boxH);
+
+    // Small filled pill above the box with identity label only
+    ctx.font = '500 12px Inter, -apple-system, sans-serif';
+    const textWidth = ctx.measureText(labelText).width;
+    const pillW = textWidth + 12;
+    const pillH = 20;
+    const pillY = Math.max(0, boxY - pillH - 4);
+
+    ctx.fillStyle = strokeColor;
+    ctx.beginPath();
+    if (ctx.roundRect) {
+      ctx.roundRect(displayX, pillY, pillW, pillH, 4);
+    } else {
+      ctx.rect(displayX, pillY, pillW, pillH);
+    }
+    ctx.fill();
+
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(labelText, displayX + 6, pillY + 14);
+  }, [camera.videoRef]);
+
+  // Capture frame and send to /api/verification/frame
+  const sendFrame = useCallback(async () => {
+    if (isProcessingRef.current || !sessionId || !sessionStarted) return;
+
+    const video = camera.videoRef.current;
+    if (!video || video.readyState < 2) return;
+
+    const rawW = video.videoWidth || 640;
+    const rawH = video.videoHeight || 480;
+    const targetW = Math.min(640, rawW);
+    const targetH = Math.round((targetW / rawW) * rawH);
+
+    if (!canvasRef.current) {
+      canvasRef.current = document.createElement('canvas');
+    }
     const canvas = canvasRef.current;
-    if (!video || !canvas || isProcessingRef.current || video.readyState < 2) return;
+    canvas.width = targetW;
+    canvas.height = targetH;
 
-    const rawWidth = video.videoWidth || 640;
-    const rawHeight = video.videoHeight || 480;
-
-    // Scale capture canvas to target ~640px wide for reduced payload & latency (L3)
-    const targetWidth = Math.min(640, rawWidth);
-    const targetHeight = Math.round((targetWidth / rawWidth) * rawHeight);
-
-    canvas.width = targetWidth;
-    canvas.height = targetHeight;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Draw raw unmirrored video frame to canvas for backend biometric & gaze analysis (L4)
-    ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
-
-    // Use JPEG quality 0.70 for live stream frames (L3)
-    const base64Image = canvas.toDataURL('image/jpeg', 0.70);
+    // Unmirrored frame sent to backend
+    ctx.drawImage(video, 0, 0, targetW, targetH);
+    const image = canvas.toDataURL('image/jpeg', 0.7);
 
     isProcessingRef.current = true;
+    framesSentRef.current += 1;
+
     try {
-      const response = await fetch(`${API_BASE}/api/verification/frame`, {
+      const res = await fetch(`${API_BASE}/api/verification/frame`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           session_id: sessionId,
-          image: base64Image,
+          image,
         }),
       });
 
-      if (!response.ok) {
-        if (response.status === 400 || response.status === 404) {
-          // Fatal session error: session completed, inactive, or missing from memory (M5)
-          const errData = await response.json().catch(() => ({}));
-          const errMsg = errData.detail || `Session is no longer active (HTTP ${response.status}). Please start a new session.`;
-          setFatalSessionError(errMsg);
-          setLatestFrame(null);
+      if (!res.ok) {
+        if (res.status === 400 || res.status === 404 || res.status === 409) {
+          // Session ended
           if (intervalRef.current) {
             clearInterval(intervalRef.current);
             intervalRef.current = null;
           }
-          const overlay = overlayCanvasRef.current;
-          if (overlay) {
-            const overlayCtx = overlay.getContext('2d');
-            if (overlayCtx) overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
-          }
+          setFatalSessionEnded(true);
           return;
         }
-        throw new Error(`Frame analysis failed (${response.status})`);
+        throw new Error(`Frame HTTP ${res.status}`);
       }
 
-      const data = await response.json();
-
-      // Reset failure streak on success (M5)
+      const data = await res.json();
+      responsesCountRef.current += 1;
       consecutiveFailuresRef.current = 0;
-      setConnectionWarning(null);
+      setConnectionWarning(false);
+      setLatest(data);
 
-      setLatestFrame(data);
-
-      // Update local rolling stats
-      setStats((prev) => {
-        const next = { ...prev, total: prev.total + 1 };
-        if (data.verification_status === 'MATCH') next.matched += 1;
-        else if (data.verification_status === 'NO_MATCH') next.unmatched += 1;
-        else if (data.verification_status === 'NO_FACE') next.noFace += 1;
-
-        if (data.is_looking_away === true) next.lookingAway += 1;
-        return next;
-      });
-
-      // Add audit events to the real-time feed
-      if (data.verification_status === 'NO_FACE') {
-        addLocalEvent('⚠️ Face Lost', 'No face detected in camera viewport', 'warning');
-      } else if (data.verification_status === 'MULTIPLE_FACES') {
-        addLocalEvent('🚨 Multiple Faces', `${data.faces_detected} faces detected in frame`, 'danger');
-      } else if (data.verification_status === 'NO_MATCH') {
-        addLocalEvent('❌ Identity Mismatch', `Similarity: ${(data.similarity * 100).toFixed(1)}%`, 'danger');
-      } else if (data.verification_status === 'UNKNOWN') {
-        addLocalEvent('⚠️ Angle Too Steep', 'Face turned far from camera (>35° yaw/pitch)', 'warning');
-      } else if (data.calibrating || data.gaze_direction === 'CALIBRATING') {
-        // Calibrating baseline gaze
-      } else if (data.is_looking_away === true) {
-        addLocalEvent('👀 Looking Away', `Direction: ${data.gaze_direction.replace('_', ' ')}`, 'warning');
+      if (data.events && data.events.length > 0) {
+        setEvents((prev) => mergeEvents(prev, data.events));
       }
 
-      // Draw bounding box & landmark indicators on overlay canvas (scale box coordinates if downscaled)
-      drawOverlay(data, rawWidth, rawHeight, targetWidth, targetHeight);
+      drawOverlay(data);
     } catch (err) {
-      console.warn('Frame processing glitch:', err.message);
+      console.warn('Frame send failed:', err.message);
       consecutiveFailuresRef.current += 1;
-      // After 3 consecutive failures, clear latestFrame, show warning banner, and grey out overlay (M5)
       if (consecutiveFailuresRef.current >= 3) {
-        setLatestFrame(null);
-        setConnectionWarning('Lost connection to the verification service. Attempting to reconnect...');
-        const overlay = overlayCanvasRef.current;
-        if (overlay) {
-          const overlayCtx = overlay.getContext('2d');
-          if (overlayCtx) {
-            overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
-            overlayCtx.fillStyle = 'rgba(15, 23, 42, 0.65)';
-            overlayCtx.fillRect(0, 0, overlay.width, overlay.height);
-          }
-        }
+        setConnectionWarning(true);
       }
     } finally {
       isProcessingRef.current = false;
     }
-  }, [sessionId]);
+  }, [sessionId, sessionStarted, camera.videoRef, drawOverlay]);
 
-  const addLocalEvent = (title, detail, level) => {
-    setEvents((prev) => {
-      const timeStr = new Date().toLocaleTimeString();
-      const last = prev[0];
-      if (last && last.title === title && Date.now() - last.ts < 2500) {
-        return prev; // Debounce repetitive frame events in UI
-      }
-      const newEvt = { id: Math.random().toString(), time: timeStr, title, detail, level, ts: Date.now() };
-      return [newEvt, ...prev.slice(0, 40)];
-    });
-  };
-
-  // Draw overlay bounding box on top of the live stream
-  const drawOverlay = (frameData, vidW, vidH, sentW, sentH) => {
-    const overlay = overlayCanvasRef.current;
-    if (!overlay) return;
-
-    overlay.width = vidW;
-    overlay.height = vidH;
-    const ctx = overlay.getContext('2d');
-    ctx.clearRect(0, 0, vidW, vidH);
-
-    if (frameData.face_box) {
-      const fb = frameData.face_box;
-      const scaleX = sentW ? vidW / sentW : 1.0;
-      const scaleY = sentH ? vidH / sentH : 1.0;
-
-      const x = fb.x * scaleX;
-      const y = fb.y * scaleY;
-      const width = fb.width * scaleX;
-      const height = fb.height * scaleY;
-
-      // Because the <video> element is mirrored in the UI via CSS (transform: scaleX(-1))
-      // for a natural mirror-view user experience, map raw camera box X to screen display X (L4):
-      const displayX = vidW - (x + width);
-
-      let strokeColor = '#10B981'; // Green for match & center
-      let statusText = 'VERIFIED MATCH';
-
-      if (frameData.verification_status === 'NO_MATCH') {
-        strokeColor = '#EF4444';
-        statusText = 'NO MATCH';
-      } else if (frameData.verification_status === 'UNKNOWN') {
-        strokeColor = '#F59E0B';
-        statusText = 'HEAD TURNED • UNCERTAIN';
-      } else if (frameData.verification_status === 'MULTIPLE_FACES') {
-        strokeColor = '#DC2626';
-        statusText = 'MULTIPLE FACES';
-      } else if (frameData.is_looking_away === true) {
-        strokeColor = '#F59E0B';
-        statusText = `MATCH • ${frameData.gaze_direction ? frameData.gaze_direction.replace('_', ' ') : 'LOOKING AWAY'}`;
-      }
-
-      // Rounded Bounding Box
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = strokeColor;
-      ctx.strokeRect(displayX, y, width, height);
-
-      // Corner Accents
-      const cLen = Math.min(24, width * 0.2);
-      ctx.lineWidth = 5;
-      ctx.beginPath();
-      // Top-Left
-      ctx.moveTo(displayX, y + cLen);
-      ctx.lineTo(displayX, y);
-      ctx.lineTo(displayX + cLen, y);
-      // Top-Right
-      ctx.moveTo(displayX + width - cLen, y);
-      ctx.lineTo(displayX + width, y);
-      ctx.lineTo(displayX + width, y + cLen);
-      // Bottom-Left
-      ctx.moveTo(displayX, y + height - cLen);
-      ctx.lineTo(displayX, y + height);
-      ctx.lineTo(displayX + cLen, y + height);
-      // Bottom-Right
-      ctx.moveTo(displayX + width - cLen, y + height);
-      ctx.lineTo(displayX + width, y + height);
-      ctx.lineTo(displayX + width, y + height - cLen);
-      ctx.stroke();
-
-      // Label background & text (drawn in unmirrored canvas space so text remains readable)
-      const simText = frameData.similarity !== null ? ` ${(frameData.similarity * 100).toFixed(0)}%` : '';
-      const label = `${statusText}${simText}`;
-      ctx.font = 'bold 13px Inter, sans-serif';
-      const textWidth = ctx.measureText(label).width;
-
-      ctx.fillStyle = strokeColor;
-      ctx.fillRect(displayX, Math.max(0, y - 26), textWidth + 16, 26);
-
-      ctx.fillStyle = '#FFFFFF';
-      ctx.fillText(label, displayX + 8, Math.max(16, y - 8));
-    }
-  };
-
-  // Start Live Verification on component mount
+  // Mount effect: Start camera immediately and start session
   useEffect(() => {
-    let active = true;
+    let mounted = true;
 
-    async function initLive() {
-      setError(null);
+    // Start camera immediately so video preview starts right away
+    camera.start().catch((camErr) => {
+      console.warn('Initial camera start error:', camErr);
+    });
+
+    async function initSession() {
+      if (!sessionId) {
+        console.warn('LiveVerification mounted without sessionId yet');
+        return;
+      }
+
       try {
-        // 1. Notify backend verification has started
         const startRes = await fetch(`${API_BASE}/api/verification/start`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -265,53 +219,56 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
         });
 
         if (!startRes.ok) {
-          throw new Error('Backend failed to start verification session');
+          throw new Error(`Start request failed (${startRes.status})`);
         }
-
-        // 2. Start webcam
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            width: { ideal: 1280, min: 640 },
-            height: { ideal: 720, min: 480 },
-            facingMode: 'user',
-          },
-          audio: false,
-        });
-
-        if (!active) {
-          stream.getTracks().forEach((t) => t.stop());
-          return;
-        }
-
-        streamRef.current = stream;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          videoRef.current.onloadedmetadata = () => {
-            videoRef.current.play().then(() => {
-              setIsCameraActive(true);
-              // Send live frames at ~5 FPS (every 200ms)
-              intervalRef.current = setInterval(captureAndSendFrame, 200);
-            });
-          };
+        if (mounted) {
+          setSessionStarted(true);
         }
       } catch (err) {
-        console.error('Live verification start error:', err);
-        setError(err.message || 'Failed to start live camera verification.');
+        console.error('Init live check error:', err);
+        if (mounted) {
+          setInitError('Could not start the live check. Check backend connection.');
+        }
       }
     }
 
-    initLive();
+    initSession();
 
     return () => {
-      active = false;
-      stopCamera();
+      mounted = false;
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+      camera.stop();
     };
-  }, [sessionId, captureAndSendFrame, stopCamera]);
+  }, [sessionId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Handle Stop Verification button click
+  // When camera turns on and session is verified started, start sending frames every 200 ms
+  useEffect(() => {
+    if (camera.status !== 'on' || !sessionStarted || fatalSessionEnded) return;
+
+    intervalRef.current = setInterval(sendFrame, 200);
+
+    return () => {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+    };
+  }, [camera.status, sessionStarted, fatalSessionEnded, sendFrame]);
+
+  // Stop session
   const handleStop = async () => {
+    if (isStopping) return;
     setIsStopping(true);
-    stopCamera();
+    setStopError(false);
+
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
+    camera.stop();
 
     try {
       const res = await fetch(`${API_BASE}/api/verification/stop`, {
@@ -321,289 +278,221 @@ export default function LiveVerification({ sessionId, referencePhoto, onStopVeri
       });
 
       if (!res.ok) {
-        throw new Error('Failed to stop verification session on backend');
+        throw new Error(`Stop failed with HTTP ${res.status}`);
       }
 
-      const summary = await res.json();
-      onStopVerification(summary);
+      const report = await res.json();
+      if (onFinished) onFinished(report);
+      else if (onStopVerification) onStopVerification(report);
     } catch (err) {
-      console.error('Stop error:', err);
-      setError(`Could not finish the session: ${err.message}. No result was produced.`);
+      console.error('Stop verification error:', err);
+      setStopError(true);
       setIsStopping(false);
     }
   };
 
-  const matchRate = stats.total > 0 ? Math.round((stats.matched / stats.total) * 100) : null;
-  const isCalibratingGaze = latestFrame?.calibrating || latestFrame?.gaze_direction === 'CALIBRATING';
-  const gazeAttentionRate = (!isCalibratingGaze && stats.total > 0)
-    ? Math.round(((stats.total - stats.lookingAway) / stats.total) * 100)
-    : null;
+  const identKey = latest?.live_status?.identity || 'CHECKING';
+  const identStatus = IDENTITY_STATUS[identKey] || IDENTITY_STATUS.CHECKING;
+
+  const attnKey = latest?.live_status?.attention || 'UNKNOWN';
+  const attnStatus = ATTENTION_STATUS[attnKey] || ATTENTION_STATUS.UNKNOWN;
+
+  const isCalibrating = latest?.live_status?.attention === 'CALIBRATING';
+  const calibProgress = Math.round((latest?.calibration_progress || 0) * 100);
+
+  const techItems = [
+    { label: 'Session ID', value: sessionId || '—' },
+    { label: 'Similarity', value: latest?.similarity != null ? latest.similarity.toFixed(3) : '—' },
+    {
+      label: 'Head yaw / pitch',
+      value:
+        latest?.gaze_yaw != null && latest?.gaze_pitch != null
+          ? `${latest.gaze_yaw.toFixed(1)}° / ${latest.gaze_pitch.toFixed(1)}°`
+          : '—',
+    },
+    {
+      label: 'Iris h / v',
+      value:
+        latest?.iris_h != null && latest?.iris_v != null
+          ? `${latest.iris_h.toFixed(2)} / ${latest.iris_v.toFixed(2)}`
+          : '—',
+    },
+    { label: 'Frames sent', value: String(framesSentRef.current) },
+    {
+      label: 'Responses per second',
+      value:
+        latest?.elapsed_s > 0
+          ? (responsesCountRef.current / latest.elapsed_s).toFixed(1)
+          : '—',
+    },
+    { label: 'Calibration progress', value: `${calibProgress}%` },
+  ];
 
   return (
-    <div className="live-verification-container">
-      {/* Hidden off-screen canvas used for capturing jpeg frame */}
-      <canvas ref={canvasRef} style={{ display: 'none' }} />
-
-      {/* Top Header & HUD */}
-      <div className="live-header">
-        <div className="header-left">
-          <div className="pulse-indicator">
-            <span className="live-dot"></span>
-            <span className="live-label">LIVE VERIFICATION ACTIVE</span>
-          </div>
-          <span className="session-id-pill">Session: {sessionId}</span>
+    <div className="live-screen">
+      {/* Top Header */}
+      <header className="live-header">
+        <div className="live-header-status">
+          <span className="live-dot" aria-hidden="true" />
+          <span className="live-title">Session in progress</span>
+          <span className="live-timer num">{formatClock(latest?.elapsed_s ?? 0)}</span>
         </div>
 
-        <div className="header-right">
-          <button
-            type="button"
-            className="btn btn-danger-stop"
-            onClick={handleStop}
-            id="btn-stop-verification"
-            disabled={isStopping}
-          >
-            {isStopping ? 'Finalizing Session...' : '⏹ Stop Verification & View Results'}
-          </button>
-        </div>
-      </div>
+        <Button
+          variant="danger"
+          icon={Square}
+          onClick={handleStop}
+          disabled={isStopping}
+          id="btn-stop-verification"
+        >
+          {isStopping ? 'Ending…' : 'End session'}
+        </Button>
+      </header>
 
-      {error && (
-        <div className="live-error-banner">
-          <span>⚠️ <strong>Error:</strong> {error}</span>
-          <div style={{ display: 'inline-flex', gap: '8px', marginLeft: '12px' }}>
-            <button className="btn-small-link" onClick={handleStop} disabled={isStopping}>
-              {isStopping ? 'Retrying...' : 'Retry'}
-            </button>
-            <button className="btn-small-link" onClick={onBackToCapture}>
-              Return to Reference Capture
-            </button>
-          </div>
-        </div>
+      {/* Alerts */}
+      {fatalSessionEnded && (
+        <Alert
+          tone="danger"
+          action={
+            <Button variant="primary" onClick={onBackToCapture}>
+              New session
+            </Button>
+          }
+        >
+          This session has ended. Start a new session.
+        </Alert>
       )}
 
-      {/* Main Verification Workspace: Live Viewport + Real-Time Telemetry */}
+      {initError && (
+        <Alert tone="danger">{initError}</Alert>
+      )}
+
+      {camera.error && (
+        <Alert
+          tone="danger"
+          action={
+            <Button variant="secondary" size="sm" onClick={camera.start}>
+              Try again
+            </Button>
+          }
+        >
+          {camera.error}
+        </Alert>
+      )}
+
+      {connectionWarning && !fatalSessionEnded && (
+        <Alert tone="warning">Connection lost. Retrying…</Alert>
+      )}
+
+      {stopError && (
+        <Alert
+          tone="danger"
+          action={
+            <Button variant="secondary" onClick={handleStop}>
+              Try again
+            </Button>
+          }
+        >
+          Could not finish the session. Try again.
+        </Alert>
+      )}
+
+      {/* Grid: 3fr / 1fr, gap 24px */}
       <div className="live-grid">
-        {/* Live Camera Viewport */}
-        <div className="viewport-card">
-          <div className="video-viewport">
+        {/* Left Column: Video + Calibration Overlay + Status Bar */}
+        <div className="live-main">
+          {/* 16:9 Mirrored Video Area */}
+          <div className="live-viewport">
             <video
-              ref={videoRef}
+              ref={camera.videoRef}
               autoPlay
               playsInline
               muted
               className="live-video"
             />
-            {/* Overlay Canvas for Bounding Box & Landmarks */}
-            <canvas ref={overlayCanvasRef} className="overlay-canvas" />
+            <canvas ref={overlayRef} className="overlay-canvas" />
 
-            {/* Connection Warning Banner (M5) */}
-            {connectionWarning && (
-              <div className="connection-lost-banner" role="alert">
-                <span className="warning-icon">⚠️</span>
-                <span>{connectionWarning}</span>
-              </div>
-            )}
-
-            {/* Calibration Banner (M4) */}
-            {latestFrame && (latestFrame.calibrating || latestFrame.gaze_direction === 'CALIBRATING') && (
-              <div className="calibration-banner">
-                <span className="pulse-dot"></span>
-                <span>Calibrating baseline gaze... Please look at screen normally</span>
-              </div>
-            )}
-
-            {/* Fatal Session Error Modal (M5) */}
-            {fatalSessionError && (
-              <div className="fatal-error-overlay">
-                <div className="fatal-error-card">
-                  <div className="fatal-error-icon">🛑</div>
-                  <h3>Session Terminated</h3>
-                  <p>{fatalSessionError}</p>
-                  <button className="btn-primary" onClick={onBackToCapture}>
-                    Return to Reference Capture
-                  </button>
+            {/* Calibration Overlay */}
+            {isCalibrating && (
+              <div className="calibration-overlay">
+                <div className="calibration-dot" aria-hidden="true" />
+                <p className="calibration-text">Look at the screen normally while we calibrate</p>
+                <div className="calibration-progress-track">
+                  <div
+                    className="calibration-progress-fill"
+                    style={{ width: `${calibProgress}%` }}
+                  />
                 </div>
               </div>
             )}
+          </div>
 
-            {/* Live Status Overlay Ribbon */}
-            <div className="hud-overlay-top">
-              {latestFrame ? (
-                <div className={`status-tag ${latestFrame.verification_status.toLowerCase()}`}>
-                  <span className="tag-icon">
-                    {latestFrame.verification_status === 'MATCH'
-                      ? '✓'
-                      : latestFrame.verification_status === 'NO_MATCH'
-                      ? '✕'
-                      : latestFrame.verification_status === 'UNKNOWN'
-                      ? '❓'
-                      : '⚠️'}
-                  </span>
-                  <span className="tag-text">
-                    {latestFrame.verification_status === 'MATCH'
-                      ? 'IDENTITY MATCH'
-                      : latestFrame.verification_status === 'NO_MATCH'
-                      ? 'IDENTITY MISMATCH'
-                      : latestFrame.verification_status === 'UNKNOWN'
-                      ? 'IDENTITY UNCERTAIN (HEAD TURNED)'
-                      : latestFrame.verification_status === 'NO_FACE'
-                      ? 'NO FACE DETECTED'
-                      : 'MULTIPLE FACES DETECTED'}
-                  </span>
-                </div>
-              ) : (
-                <div className="status-tag initializing">
-                  <span className="spinner-dot"></span> Ingesting frames...
-                </div>
-              )}
-
-              {latestFrame && (
-                <div
-                  className={`gaze-tag ${
-                    latestFrame.is_looking_away === true
-                      ? 'away'
-                      : latestFrame.is_looking_away === false
-                      ? 'center'
-                      : 'unknown'
-                  }`}
-                >
-                  <span className="gaze-icon">
-                    {latestFrame.calibrating || latestFrame.gaze_direction === 'CALIBRATING'
-                      ? '🎯'
-                      : latestFrame.gaze_direction === 'CENTER'
-                      ? '🎯'
-                      : latestFrame.gaze_direction === 'LOOKING_LEFT'
-                      ? '⬅️'
-                      : latestFrame.gaze_direction === 'LOOKING_RIGHT'
-                      ? '➡️'
-                      : latestFrame.gaze_direction === 'LOOKING_UP'
-                      ? '⬆️'
-                      : latestFrame.gaze_direction === 'LOOKING_DOWN'
-                      ? '⬇️'
-                      : '👁️'}
-                  </span>
-                  <span>
-                    {latestFrame.calibrating || latestFrame.gaze_direction === 'CALIBRATING'
-                      ? 'CALIBRATING'
-                      : latestFrame.gaze_direction
-                      ? latestFrame.gaze_direction.replace('_', ' ')
-                      : 'UNKNOWN'}
-                  </span>
-                </div>
-              )}
+          {/* One-Line Status Bar */}
+          <div className="live-status-bar">
+            <div className="status-item">
+              <span className="status-label">Identity</span>
+              <Badge tone={identStatus.tone}>{identStatus.label}</Badge>
             </div>
-
-            {/* Bottom HUD Bar */}
-            <div className="hud-overlay-bottom">
-              <div className="hud-metric">
-                <span className="metric-title">Similarity</span>
-                <span className="metric-number">
-                  {latestFrame?.similarity !== null && latestFrame?.similarity !== undefined
-                    ? `${(latestFrame.similarity * 100).toFixed(1)}%`
-                    : '—'}
-                </span>
-              </div>
-
-              <div className="hud-metric">
-                <span className="metric-title">Head Pose</span>
-                <span className="metric-number">
-                  {latestFrame?.gaze_yaw !== null && latestFrame?.gaze_yaw !== undefined
-                    ? `Y:${latestFrame.gaze_yaw > 0 ? '+' : ''}${latestFrame.gaze_yaw}° P:${latestFrame.gaze_pitch > 0 ? '+' : ''}${latestFrame.gaze_pitch}°`
-                    : '—'}
-                </span>
-              </div>
-
-              <div className="hud-metric">
-                <span className="metric-title">Frames</span>
-                <span className="metric-number">{stats.total}</span>
-              </div>
+            <div className="status-item">
+              <span className="status-label">Attention</span>
+              <Badge tone={attnStatus.tone}>{attnStatus.label}</Badge>
             </div>
           </div>
         </div>
 
-        {/* Real-time Telemetry & Live Event Log Sidebar */}
-        <div className="telemetry-sidebar">
-          {/* Reference Photo Comparison Card */}
-          <div className="telemetry-card">
-            <h4>Reference Identity</h4>
-            <div className="reference-compare-row">
-              <img src={referencePhoto} alt="Reference face" className="ref-compare-thumb" />
-              <div className="ref-compare-details">
-                <div className="detail-item">
-                  <span className="detail-label">Status</span>
-                  <span className="detail-value text-success">Active Session</span>
-                </div>
-                <div className="detail-item">
-                  <span className="detail-label">Algorithm</span>
-                  <span className="detail-value">Face match (SFace)</span>
-                </div>
-                <div className="detail-item">
-                  <span className="detail-label">Gaze Tracking</span>
-                  <span className="detail-value">Head pose + iris position</span>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Running Compliance Gauges */}
-          <div className="telemetry-card">
-            <h4>Live Compliance Metrics</h4>
-            <div className="gauge-group">
-              <div className="gauge-item">
-                <div className="gauge-header">
-                  <span>Match Consistency</span>
-                  <span className="gauge-val">{matchRate !== null ? `${matchRate}%` : '—'}</span>
-                </div>
-                <div className="gauge-track">
-                  <div
-                    className={`gauge-fill ${matchRate !== null && matchRate >= 80 ? 'good' : 'warning'}`}
-                    style={{ width: `${matchRate ?? 0}%` }}
-                  ></div>
-                </div>
-              </div>
-
-              <div className="gauge-item">
-                <div className="gauge-header">
-                  <span>Gaze Attention (Center)</span>
-                  <span className="gauge-val">
-                    {isCalibratingGaze ? 'Calibrating...' : gazeAttentionRate !== null ? `${gazeAttentionRate}%` : '—'}
-                  </span>
-                </div>
-                <div className="gauge-track">
-                  <div
-                    className={`gauge-fill ${gazeAttentionRate !== null && gazeAttentionRate >= 70 ? 'good' : 'warning'}`}
-                    style={{ width: `${gazeAttentionRate ?? 0}%` }}
-                  ></div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Live Timestamped Event Log (Phases 4 & 5) */}
-          <div className="telemetry-card events-card">
-            <div className="events-card-header">
-              <h4>Live Violation Log</h4>
-              <span className="event-count-badge">{events.length} {events.length === 1 ? 'violation' : 'violations'}</span>
-            </div>
-            <div className="events-stream-list">
+        {/* Right Column: Activity + Reference */}
+        <div className="live-sidebar">
+          {/* Activity Card */}
+          <div className="activity-card">
+            <h3>Activity</h3>
+            <div className="activity-list">
               {events.length === 0 ? (
-                <div className="events-empty">
-                  <span>🟢 No violations detected</span>
-                </div>
+                <div className="activity-empty muted">No issues so far</div>
               ) : (
-                events.map((evt) => (
-                  <div key={evt.id} className={`event-row level-${evt.level}`}>
-                    <span className="event-time">{evt.time}</span>
-                    <div className="event-info">
-                      <strong className="event-title">{evt.title}</strong>
-                      <span className="event-detail">{evt.detail}</span>
+                events.map((evt) => {
+                  const intervalType = INTERVAL_TYPE[evt.type] || { tone: 'neutral' };
+                  const dotColor = TONE_HEX[intervalType.tone] || '#94a3b8';
+                  const isOngoing = evt.end_s === null || evt.end_s === undefined;
+
+                  return (
+                    <div key={evt.id} className="activity-row">
+                      <span className="activity-time num">{formatClock(evt.start_s)}</span>
+                      <div className="activity-main">
+                        <span
+                          className="activity-dot"
+                          style={{ backgroundColor: dotColor }}
+                          aria-hidden="true"
+                        />
+                        <span className="activity-message">{evt.message}</span>
+                      </div>
+                      <span className={`activity-duration ${isOngoing ? 'ongoing' : 'num'}`}>
+                        {isOngoing ? 'ongoing' : formatSeconds(evt.duration_s)}
+                      </span>
                     </div>
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
           </div>
+
+          {/* Reference Photo Card */}
+          <div className="reference-card">
+            <h3>Reference</h3>
+            <div className="reference-content">
+              {referencePhoto && (
+                <img src={referencePhoto} alt="Reference photo" className="reference-thumb" />
+              )}
+              <span className="reference-text">Photo accepted</span>
+            </div>
+          </div>
         </div>
+      </div>
+
+      {/* Technical Details Section */}
+      <div className="tech-details-section">
+        <Disclosure title="Technical details">
+          <KeyValue items={techItems} />
+        </Disclosure>
       </div>
     </div>
   );

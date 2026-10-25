@@ -18,7 +18,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir --default-timeout=300 --retries=10 -r requirements.txt
 
-# Copy application source code and weights
+# Bake model weights into the image at build time (Section 10)
+RUN mkdir -p /app/weights && python -c "\
+import urllib.request as u; \
+base = 'https://github.com/opencv/opencv_zoo/raw/main/models/'; \
+files = {'face_detection_yunet_2023mar.onnx': 'face_detection_yunet/', \
+         'face_recognition_sface_2021dec.onnx': 'face_recognition_sface/'}; \
+[u.urlretrieve(base + d + f, '/app/weights/' + f) for f, d in files.items()]; \
+import os; sizes = {f: os.path.getsize('/app/weights/' + f) for f in files}; print(sizes); \
+assert all(s > 100000 for s in sizes.values()), 'weights download looks wrong (Git LFS pointer?)'"
+
+# Copy application source code
 COPY . .
 
 # Expose FastAPI backend port

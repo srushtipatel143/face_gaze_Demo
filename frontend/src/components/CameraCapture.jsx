@@ -1,374 +1,398 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
+import {
+  Camera,
+  RotateCcw,
+  Check,
+  Play,
+  Circle,
+  CheckCircle2,
+  XCircle,
+  MinusCircle,
+} from 'lucide-react';
+import { useCamera } from '../hooks/useCamera';
+import { Button, Badge, Alert } from './ui';
 import { API_BASE } from '../config';
 import '../css/CameraCapture.css';
 
-/**
- * CameraCapture component for Phase 1: Reference Photo Capture
- * Handles webcam stream initialization, mirror preview, oval face guide,
- * snapshot capture to canvas, track cleanup, retake, and confirmation.
- */
-export default function CameraCapture({ onConfirmPhoto, confirmedPhoto = null }) {
-  const videoRef = useRef(null);
-  const canvasRef = useRef(null);
-  const streamRef = useRef(null);
+const DEFAULT_CHECKS = [
+  { id: 'face_detected', label: 'Face detected', passed: null, detail: null },
+  { id: 'single_face', label: 'Only one person', passed: null, detail: null },
+  { id: 'face_size', label: 'Close enough to the camera', passed: null, detail: null },
+  { id: 'sharpness', label: 'Image is sharp', passed: null, detail: null },
+  { id: 'lighting', label: 'Good lighting', passed: null, detail: null },
+  { id: 'facing_camera', label: 'Facing the camera', passed: null, detail: null },
+  { id: 'eyes_open', label: 'Eyes open', passed: null, detail: null },
+];
 
-  const [cameraActive, setCameraActive] = useState(false);
-  const [isLoadingCamera, setIsLoadingCamera] = useState(false);
-  const [capturedImage, setCapturedImage] = useState(confirmedPhoto);
-  const [isConfirmed, setIsConfirmed] = useState(Boolean(confirmedPhoto));
-  const [error, setError] = useState(null);
-  const [showGuide, setShowGuide] = useState(true);
+export default function CameraCapture({
+  onAccepted,
+  onStartLive,
+  onConfirmPhoto,
+  confirmedPhoto = null,
+  initialReference = null,
+}) {
+  const { videoRef, status: cameraStatus, error: cameraError, start: startCamera, stop: stopCamera } = useCamera();
 
-  const [isValidating, setIsValidating] = useState(false);
-  const [validationResult, setValidationResult] = useState(null);
-  const [validationIssues, setValidationIssues] = useState([]);
+  const [capturedPhoto, setCapturedPhoto] = useState(
+    initialReference?.photo || confirmedPhoto || null
+  );
+  const [stepState, setStepState] = useState(
+    initialReference?.photo || confirmedPhoto ? 'accepted' : 'off'
+  );
+  const [checks, setChecks] = useState(
+    initialReference?.checks || DEFAULT_CHECKS
+  );
+  const [networkError, setNetworkError] = useState(null);
+  const [activeSessionId, setActiveSessionId] = useState(
+    initialReference?.sessionId || null
+  );
+  const sessionIdRef = useRef(initialReference?.sessionId || null);
 
-  // Stop all active tracks on the camera stream
-  const stopCamera = useCallback(() => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
-    }
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
-    }
-    setCameraActive(false);
-    setIsLoadingCamera(false);
-  }, []);
+  const handleTurnOnCamera = async () => {
+    setCapturedPhoto(null);
+    setChecks(DEFAULT_CHECKS);
+    setNetworkError(null);
+    setStepState('live');
+    await startCamera();
+  };
 
-  // Request camera permission and start video stream
-  const startCamera = useCallback(async () => {
-    setError(null);
-    setValidationResult(null);
-    setIsLoadingCamera(true);
+  const verifyPhoto = async (photoUrl) => {
+    if (!photoUrl) return null;
 
-    // Stop any existing stream first
-    stopCamera();
+    setStepState('checking');
+    setNetworkError(null);
 
     try {
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        throw new Error('Your browser does not support webcam video capture (navigator.mediaDevices.getUserMedia is not available).');
-      }
-
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          width: { ideal: 1280, min: 640 },
-          height: { ideal: 720, min: 480 },
-          facingMode: 'user',
-        },
-        audio: false,
+      const res = await fetch(`${API_BASE}/api/reference`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image: photoUrl }),
       });
 
-      streamRef.current = stream;
-
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.onloadedmetadata = () => {
-          videoRef.current
-            .play()
-            .then(() => {
-              setCameraActive(true);
-              setIsLoadingCamera(false);
-            })
-            .catch((err) => {
-              console.error('Video play error:', err);
-              setIsLoadingCamera(false);
-            });
-        };
+      if (!res.ok) {
+        throw new Error(`Server returned ${res.status}`);
       }
-    } catch (err) {
-      console.error('Webcam access error:', err);
-      setIsLoadingCamera(false);
-      setCameraActive(false);
 
-      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-        setError('Camera permission denied. Please allow camera access in your browser address bar and click "Open Camera".');
-      } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
-        setError('No camera device was found. Please ensure a webcam is connected and enabled.');
-      } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
-        setError('Webcam is currently in use by another application. Please close other camera apps and retry.');
+      const data = await res.json();
+      setChecks(data.checks || DEFAULT_CHECKS);
+
+      if (data.session_id) {
+        sessionIdRef.current = data.session_id;
+        setActiveSessionId(data.session_id);
+        if (onAccepted) {
+          onAccepted({
+            photo: photoUrl,
+            sessionId: data.session_id,
+            checks: data.checks,
+          });
+        }
+        if (onConfirmPhoto) {
+          onConfirmPhoto(photoUrl, data.session_id, data);
+        }
+      }
+
+      if (data.success) {
+        setStepState('accepted');
       } else {
-        setError(err.message || 'Unable to access camera.');
+        setStepState('rejected');
       }
+      return data;
+    } catch (err) {
+      console.error('Reference photo check failed:', err);
+      setNetworkError('Could not reach the verification service. Try again.');
+      setStepState('preview');
+      return null;
     }
-  }, [stopCamera]);
+  };
 
-  // Clean up stream when component unmounts
-  useEffect(() => {
-    return () => {
-      stopCamera();
-    };
-  }, [stopCamera]);
-
-  // Capture still image from the video feed onto a canvas
-  const handleCapture = () => {
+  const handleCapture = async () => {
     const video = videoRef.current;
-    const canvas = canvasRef.current;
+    if (!video) return;
 
-    if (!video || !canvas) return;
+    const width = video.videoWidth || 1280;
+    const height = video.videoHeight || 720;
 
-    const width = video.videoWidth || 640;
-    const height = video.videoHeight || 480;
-
+    const canvas = document.createElement('canvas');
     canvas.width = width;
     canvas.height = height;
 
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Draw raw unmirrored video frame directly to canvas for backend biometric analysis (L4)
+    // Draw mirrored video frame to canvas so still image matches what user saw
+    ctx.translate(width, 0);
+    ctx.scale(-1, 1);
     ctx.drawImage(video, 0, 0, width, height);
 
-    // Export high-quality JPEG
-    const imageDataUrl = canvas.toDataURL('image/jpeg', 0.95);
-
-    // Stop webcam tracks immediately after capture so webcam light turns off
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
+    setCapturedPhoto(dataUrl);
     stopCamera();
+    setChecks(DEFAULT_CHECKS);
+    setNetworkError(null);
 
-    setCapturedImage(imageDataUrl);
-    setIsConfirmed(false);
-    setError(null);
-    setValidationResult(null);
-    setValidationIssues([]);
+    // Immediately verify the photo so Start live check appears without extra clicks
+    await verifyPhoto(dataUrl);
   };
 
-  // Reset captured image and reactivate webcam
-  const handleRetake = () => {
-    setCapturedImage(null);
-    setIsConfirmed(false);
-    setError(null);
-    setValidationResult(null);
-    setValidationIssues([]);
-    startCamera();
+  const handleRetake = async () => {
+    setCapturedPhoto(null);
+    setChecks(DEFAULT_CHECKS);
+    setNetworkError(null);
+    sessionIdRef.current = null;
+    setActiveSessionId(null);
+    setStepState('live');
+    await startCamera();
   };
 
-  // Confirm photo and validate via Phase 2 backend
-  const handleConfirm = async () => {
-    if (!capturedImage || isValidating) return;
-
-    setIsValidating(true);
-    setError(null);
-    setValidationIssues([]);
-
-    try {
-      const response = await fetch(`${API_BASE}/api/reference`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image: capturedImage }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Server returned error status ${response.status}`);
-      }
-
-      const data = await response.json();
-
-      if (!data.success) {
-        setError(data.message || 'Face validation failed. Please retake the photo.');
-        setValidationIssues(data.issues || []);
-        setIsValidating(false);
-        return;
-      }
-
-      // Valid single face detected and session created!
-      setIsConfirmed(true);
-      setValidationResult(data);
-      setValidationIssues([]);
-      setIsValidating(false);
-
-      if (onConfirmPhoto) {
-        onConfirmPhoto(capturedImage, data.session_id, data);
-      }
-    } catch (err) {
-      console.error('Validation request error:', err);
-      setError(`Backend error: ${err.message}. Ensure the FastAPI server is running on port 8000.`);
-      setIsValidating(false);
+  const handleStartLiveClick = async () => {
+    let sid = sessionIdRef.current || activeSessionId;
+    if (!sid && capturedPhoto) {
+      const data = await verifyPhoto(capturedPhoto);
+      sid = data?.session_id || sessionIdRef.current;
+    }
+    if (onStartLive) {
+      onStartLive(sid);
     }
   };
 
+  const isLive = stepState === 'live';
+  const isCameraOff = (stepState === 'off' || cameraStatus === 'off') && !capturedPhoto && stepState !== 'live';
+
   return (
-    <div className="camera-capture-container">
-      {/* Hidden canvas for snapshot rasterization */}
-      <canvas ref={canvasRef} style={{ display: 'none' }} />
-
-      {/* Header section with phase badge */}
-      <div className="camera-header">
-        <div className="camera-badge">
-          <span className={`status-dot ${isConfirmed ? 'confirmed' : cameraActive ? 'active' : 'idle'}`}></span>
-          {isConfirmed
-            ? 'Reference Photo Confirmed'
-            : capturedImage
-            ? 'Photo Captured — Review & Confirm'
-            : cameraActive
-            ? 'Live Webcam Active'
-            : 'Camera Ready'}
+    <div className="reference-screen">
+      {/* Left Column: Reference Photo Viewport & Controls */}
+      <div className="reference-main">
+        <div className="reference-header">
+          <h2>Reference photo</h2>
+          <p>
+            Take a clear photo of your face. It is used to confirm it is you during the live check.
+          </p>
         </div>
-        <h2 className="camera-title">Capture Reference Photo</h2>
-        <p className="camera-subtitle">
-          Position your face clearly in the center under good lighting. This image establishes your reference identity.
-        </p>
-      </div>
 
-      {/* Error Banner */}
-      {error && (
-        <div className="camera-error-banner" role="alert">
-          <div className="error-icon">⚠️</div>
-          <div className="error-content">
-            <strong>Photo Quality Issue:</strong>
-            <p>{error}</p>
-            {validationIssues && validationIssues.length > 0 && (
-              <ul className="error-issues-list" style={{ marginTop: '0.45rem', paddingLeft: '1.2rem', fontSize: '0.85rem', color: '#fca5a5' }}>
-                {validationIssues.map((issue, idx) => (
-                  <li key={idx}>{issue}</li>
-                ))}
-              </ul>
-            )}
-          </div>
-          <button className="error-retry-btn" onClick={handleRetake}>
-            Retake
-          </button>
-        </div>
-      )}
+        {cameraError && (
+          <Alert
+            tone="danger"
+            action={
+              <Button variant="secondary" size="sm" onClick={startCamera}>
+                Try again
+              </Button>
+            }
+          >
+            {cameraError}
+          </Alert>
+        )}
 
-      {/* Viewport Frame */}
-      <div className="viewport-wrapper">
-        {capturedImage ? (
-          // Still Captured Preview
-          <div className="preview-container">
-            <img src={capturedImage} alt="Captured reference face" className="preview-image" />
-            <div className="preview-overlay-tag">
-              {isConfirmed ? '✅ Confirmed Reference' : '📷 Captured Snapshot'}
-            </div>
-          </div>
-        ) : (
-          // Live Video Container
-          <div className="video-container">
-            <video
-              ref={videoRef}
-              autoPlay
-              playsInline
-              muted
-              className={`webcam-video ${cameraActive ? 'visible' : 'hidden'}`}
-            />
+        {networkError && (
+          <Alert tone="danger">{networkError}</Alert>
+        )}
 
-            {!cameraActive && !isLoadingCamera && (
-              <div className="camera-placeholder">
-                <div className="placeholder-icon">📷</div>
-                <p className="placeholder-text">Camera is currently paused or inactive</p>
-                <button className="btn btn-primary" onClick={startCamera}>
-                  Start Webcam
-                </button>
-              </div>
-            )}
-
-            {isLoadingCamera && (
-              <div className="camera-loading">
-                <div className="spinner"></div>
-                <p>Initializing camera sensor...</p>
-              </div>
-            )}
-
-            {/* Oval Face Guide Overlay */}
-            {cameraActive && showGuide && (
-              <div className="face-guide-overlay" title="Align your face within the oval">
-                <div className="face-oval">
-                  <div className="crosshair-h"></div>
-                  <div className="crosshair-v"></div>
+        {/* 16:9 Black Viewport Area */}
+        <div className="camera-viewport">
+          {capturedPhoto ? (
+            <>
+              <img
+                src={capturedPhoto}
+                alt="Captured reference face"
+                className="camera-still"
+              />
+              {stepState === 'checking' && (
+                <div className="checking-overlay">
+                  <div className="camera-spinner" aria-label="Checking photo" />
                 </div>
-                <span className="guide-hint">Align your face inside the oval</span>
+              )}
+              {stepState === 'accepted' && (
+                <div className="accepted-badge-container">
+                  <Badge tone="success">Photo accepted</Badge>
+                </div>
+              )}
+            </>
+          ) : isLive ? (
+            <>
+              <video
+                ref={videoRef}
+                autoPlay
+                playsInline
+                muted
+                className="camera-video"
+              />
+              <div className="face-oval-outline" aria-hidden="true">
+                {cameraStatus === 'starting' && (
+                  <div className="oval-spinner" aria-label="Starting camera" />
+                )}
               </div>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* Toolbar Controls */}
-      <div className="camera-controls">
-        {!capturedImage ? (
-          // Camera active state controls
-          cameraActive ? (
-            <div className="button-group">
-              <button
-                type="button"
-                className="btn btn-secondary"
-                onClick={() => setShowGuide((prev) => !prev)}
-                title="Toggle alignment guide"
-              >
-                {showGuide ? 'Hide Guide' : 'Show Guide'}
-              </button>
-              <button
-                type="button"
-                className="btn btn-capture"
-                onClick={handleCapture}
-                id="btn-capture-photo"
-              >
-                <span className="shutter-circle"></span>
-                Capture Photo
-              </button>
-              <button
-                type="button"
-                className="btn btn-secondary"
-                onClick={stopCamera}
-                title="Turn off webcam"
-              >
-                Stop Camera
-              </button>
-            </div>
+            </>
           ) : (
-            <button
-              type="button"
-              className="btn btn-primary btn-large"
-              onClick={startCamera}
-              id="btn-open-camera"
+            <div className="camera-off-state">
+              <Camera size={32} aria-hidden="true" />
+              <p>Camera is off</p>
+            </div>
+          )}
+        </div>
+
+        {/* Action Buttons Below Video Area */}
+        <div className="camera-actions">
+          {isCameraOff && (
+            <Button
+              variant="primary"
+              icon={Camera}
+              onClick={handleTurnOnCamera}
+              id="btn-turn-on-camera"
             >
-              Open Camera
-            </button>
-          )
-        ) : (
-          // Post-capture controls: Retake & Confirm
-          <div className="button-group">
-            <button
-              type="button"
-              className="btn btn-outline"
-              onClick={handleRetake}
-              id="btn-retake-photo"
+              Turn on camera
+            </Button>
+          )}
+
+          {isLive && (
+            <Button
+              variant="primary"
+              icon={Camera}
+              onClick={handleCapture}
+              disabled={cameraStatus !== 'on'}
+              id="btn-take-photo"
             >
-              🔄 Retake Photo
-            </button>
-            <button
-              type="button"
-              className={`btn ${isConfirmed ? 'btn-confirmed' : 'btn-success'}`}
-              onClick={handleConfirm}
-              id="btn-confirm-photo"
-              disabled={isConfirmed || isValidating}
-            >
-              {isValidating
-                ? '⏳ Validating Face...'
-                : isConfirmed
-                ? '✓ Photo Accepted'
-                : '✓ Confirm Photo'}
-            </button>
-          </div>
-        )}
+              {cameraStatus === 'starting' ? 'Starting camera…' : 'Take photo'}
+            </Button>
+          )}
+
+          {stepState === 'preview' && (
+            <>
+              <Button
+                variant="secondary"
+                icon={RotateCcw}
+                onClick={handleRetake}
+                id="btn-retake-photo"
+              >
+                Retake
+              </Button>
+              <Button
+                variant="primary"
+                icon={Play}
+                onClick={handleUsePhoto}
+                id="btn-use-photo"
+              >
+                Start live check
+              </Button>
+            </>
+          )}
+
+          {stepState === 'checking' && (
+            <>
+              <Button variant="secondary" icon={RotateCcw} disabled>
+                Retake
+              </Button>
+              <Button variant="primary" disabled id="btn-use-photo">
+                <span className="spinner-inline" aria-hidden="true" />
+                Checking photo…
+              </Button>
+            </>
+          )}
+
+          {stepState === 'rejected' && (
+            <>
+              <Button
+                variant="secondary"
+                icon={RotateCcw}
+                onClick={handleRetake}
+                id="btn-retake-photo"
+              >
+                Retake
+              </Button>
+              <Button
+                variant="primary"
+                icon={Play}
+                onClick={handleStartLiveClick}
+                id="btn-start-live-check-rejected"
+              >
+                Start live check
+              </Button>
+            </>
+          )}
+
+          {stepState === 'accepted' && (
+            <>
+              <Button
+                variant="secondary"
+                icon={RotateCcw}
+                onClick={handleRetake}
+                id="btn-retake-photo"
+              >
+                Retake
+              </Button>
+              <Button
+                variant="primary"
+                icon={Play}
+                onClick={handleStartLiveClick}
+                id="btn-start-live-check-main"
+              >
+                Start live check
+              </Button>
+            </>
+          )}
+        </div>
       </div>
 
-      {/* Confirmed info alert */}
-      {isConfirmed && (
-        <div className="confirmation-banner">
-          <div className="banner-icon">🎯</div>
-          <div className="banner-text">
-            <strong>Reference photo accepted</strong>
-            <p>
-              Single clear face detected and validated
-              {validationResult?.quality_score ? ` (Quality: ${validationResult.quality_score}%)` : ''}.
-              {validationResult?.session_id ? ` Session ID: ${validationResult.session_id}` : ''}
-            </p>
+      {/* Right Column: Structured Checklist & Tips */}
+      <div className="checks-card">
+        <h3>Photo checks</h3>
+
+        <ul className="checklist">
+          {checks.map((item) => {
+            let icon = <Circle size={16} className="check-icon check-pending" aria-hidden="true" />;
+            let detailText = null;
+
+            if (stepState === 'rejected' || stepState === 'accepted') {
+              if (item.passed === true) {
+                icon = <CheckCircle2 size={16} className="check-icon check-passed" aria-hidden="true" />;
+              } else if (item.passed === false) {
+                icon = <XCircle size={16} className="check-icon check-failed" aria-hidden="true" />;
+                detailText = item.detail;
+              } else if (item.passed === null) {
+                icon = <MinusCircle size={16} className="check-icon check-null" aria-hidden="true" />;
+                detailText = 'Not checked';
+              }
+            }
+
+            return (
+              <li key={item.id} className="checklist-item">
+                {icon}
+                <div className="check-content">
+                  <span className="check-label">{item.label}</span>
+                  {detailText && (
+                    <span className={`check-detail ${item.passed === false ? 'error-detail' : ''}`}>
+                      {detailText}
+                    </span>
+                  )}
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+
+        {/* Tips: Only shown before a photo is taken */}
+        {!capturedPhoto && stepState !== 'accepted' && stepState !== 'rejected' && (
+          <div className="photo-tips">
+            <h4 className="tips-title">Tips</h4>
+            <ul className="tips-list">
+              <li>Face a window or lamp.</li>
+              <li>Remove sunglasses.</li>
+            </ul>
           </div>
-          <button className="btn-small-link" onClick={handleRetake}>
-            Change Photo
-          </button>
-        </div>
-      )}
+        )}
+
+        {/* Start Live Check Button */}
+        {(stepState === 'accepted' || stepState === 'rejected' || stepState === 'preview') && (
+          <Button
+            variant="primary"
+            size="lg"
+            icon={Play}
+            onClick={handleStartLiveClick}
+            id="btn-start-live-check"
+            className="btn-start-live"
+          >
+            Start live check
+          </Button>
+        )}
+      </div>
     </div>
   );
 }

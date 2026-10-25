@@ -347,8 +347,7 @@
   padding: 0.2rem 0.5rem;
   border-radius: 10px;
   color: #94a3b8;
-}
-
+.issues-timeline,
 .audit-timeline {
   display: flex;
   flex-direction: column;
@@ -358,10 +357,12 @@
   padding-right: 0.3rem;
 }
 
+.issues-timeline::-webkit-scrollbar,
 .audit-timeline::-webkit-scrollbar {
   width: 4px;
 }
 
+.issues-timeline::-webkit-scrollbar-thumb,
 .audit-timeline::-webkit-scrollbar-thumb {
   background: rgba(255, 255, 255, 0.15);
   border-radius: 2px;
