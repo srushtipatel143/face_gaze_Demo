@@ -54,6 +54,7 @@ export default function LiveVerification({
   const [events, setEvents] = useState([]);
   const [connectionWarning, setConnectionWarning] = useState(false);
   const [fatalSessionEnded, setFatalSessionEnded] = useState(false);
+  const [sessionStarted, setSessionStarted] = useState(false);
   const [initError, setInitError] = useState(null);
   const [isStopping, setIsStopping] = useState(false);
   const [stopError, setStopError] = useState(false);
@@ -123,7 +124,7 @@ export default function LiveVerification({
 
   // Capture frame and send to /api/verification/frame
   const sendFrame = useCallback(async () => {
-    if (isProcessingRef.current) return;
+    if (isProcessingRef.current || !sessionId || !sessionStarted) return;
 
     const video = camera.videoRef.current;
     if (!video || video.readyState < 2) return;
@@ -193,7 +194,7 @@ export default function LiveVerification({
     } finally {
       isProcessingRef.current = false;
     }
-  }, [sessionId, camera.videoRef, drawOverlay]);
+  }, [sessionId, sessionStarted, camera.videoRef, drawOverlay]);
 
   // Mount effect: Start camera immediately and start session
   useEffect(() => {
@@ -220,6 +221,9 @@ export default function LiveVerification({
         if (!startRes.ok) {
           throw new Error(`Start request failed (${startRes.status})`);
         }
+        if (mounted) {
+          setSessionStarted(true);
+        }
       } catch (err) {
         console.error('Init live check error:', err);
         if (mounted) {
@@ -240,9 +244,9 @@ export default function LiveVerification({
     };
   }, [sessionId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // When camera turns on, start sending frames every 200 ms
+  // When camera turns on and session is verified started, start sending frames every 200 ms
   useEffect(() => {
-    if (camera.status !== 'on' || fatalSessionEnded) return;
+    if (camera.status !== 'on' || !sessionStarted || fatalSessionEnded) return;
 
     intervalRef.current = setInterval(sendFrame, 200);
 
@@ -252,7 +256,7 @@ export default function LiveVerification({
         intervalRef.current = null;
       }
     };
-  }, [camera.status, fatalSessionEnded, sendFrame]);
+  }, [camera.status, sessionStarted, fatalSessionEnded, sendFrame]);
 
   // Stop session
   const handleStop = async () => {

@@ -37,7 +37,7 @@ export default function CameraCapture({
     initialReference?.photo || confirmedPhoto || null
   );
   const [stepState, setStepState] = useState(
-    initialReference?.photo || confirmedPhoto ? 'accepted' : 'live'
+    initialReference?.photo || confirmedPhoto ? 'accepted' : 'off'
   );
   const [checks, setChecks] = useState(
     initialReference?.checks || DEFAULT_CHECKS
@@ -47,13 +47,6 @@ export default function CameraCapture({
     initialReference?.sessionId || null
   );
   const sessionIdRef = useRef(initialReference?.sessionId || null);
-
-  // Auto-start camera when landing on reference screen without photo
-  useEffect(() => {
-    if (!initialReference?.photo && !confirmedPhoto) {
-      startCamera();
-    }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleTurnOnCamera = async () => {
     setCapturedPhoto(null);
