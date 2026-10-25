@@ -115,3 +115,52 @@ def test_cleanup_old_sessions():
     store.cleanup_old()
     with pytest.raises(SessionNotFound):
         store.get(sid)
+
+
+def test_session_reference_embedding_build():
+    """Unit test that the session embedding is built after 5 MATCH frames and not from NO_MATCH frames."""
+    import numpy as np
+    store = SessionStore()
+    sid = store.create(reference_embedding=[0.1, 0.2], metadata={})
+    store.start(sid)
+
+    # 1. NO_MATCH frames with embedding -> should not build session embedding
+    no_match_emb = np.array([1.0, 0.0], dtype=np.float32)
+    for _ in range(5):
+        a = _make_analysis(identity=NO_MATCH, sim=0.2)
+        a.embedding = no_match_emb
+        store.add_frame(sid, a)
+    assert store.get(sid).session_embedding is None
+    assert len(store.get(sid).session_embedding_candidates) == 0
+
+    # 2. MATCH frame with low similarity (< 0.5) -> should not build
+    low_sim_emb = np.array([0.5, 0.5], dtype=np.float32)
+    a = _make_analysis(identity=MATCH, sim=0.45)
+    a.embedding = low_sim_emb
+    store.add_frame(sid, a)
+    assert store.get(sid).session_embedding is None
+    assert len(store.get(sid).session_embedding_candidates) == 0
+
+    # 3. 4 MATCH frames with sim >= 0.5 -> candidates reach 4, session_embedding still None
+    match_emb = np.array([0.6, 0.8], dtype=np.float32)
+    for _ in range(4):
+        a = _make_analysis(identity=MATCH, sim=0.7)
+        a.embedding = match_emb
+        store.add_frame(sid, a)
+    assert store.get(sid).session_embedding is None
+    assert len(store.get(sid).session_embedding_candidates) == 4
+
+    # 4. 5th MATCH frame -> session_embedding is built and normalized
+    a = _make_analysis(identity=MATCH, sim=0.8)
+    a.embedding = match_emb
+    store.add_frame(sid, a)
+    session = store.get(sid)
+    assert session.session_embedding is not None
+    assert np.isclose(np.linalg.norm(session.session_embedding), 1.0)
+
+    # 5. Further frames do not alter the frozen session embedding
+    initial_frozen = np.copy(session.session_embedding)
+    a = _make_analysis(identity=MATCH, sim=0.9)
+    a.embedding = np.array([0.0, 1.0], dtype=np.float32)
+    store.add_frame(sid, a)
+    assert np.allclose(session.session_embedding, initial_frozen)

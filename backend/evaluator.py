@@ -81,7 +81,8 @@ def _overall_verdict(face_v: str, gaze_v: str) -> str:
 
 def _metrics(records: List[FrameRecord], intervals: List[Dict[str, Any]],
              duration_s: float, period_s: float,
-             calibration: Dict[str, bool]) -> Dict[str, Any]:
+             calibration: Dict[str, bool],
+             session_reference_used: bool = False) -> Dict[str, Any]:
     total_frames = len(records)
     fps = round(total_frames / duration_s, 1) if duration_s > 0 else 0.0
 
@@ -177,6 +178,7 @@ def _metrics(records: List[FrameRecord], intervals: List[Dict[str, Any]],
             "median": round(float(np.median(s_arr)), 3),
             "max": round(float(np.max(s_arr)), 3),
             "near_threshold_frames": sum(1 for s in sims if abs(s - thresh) <= config.SIMILARITY_NEAR_MARGIN),
+            "session_reference_used": session_reference_used,
         }
     else:
         sim_stats = {
@@ -187,6 +189,7 @@ def _metrics(records: List[FrameRecord], intervals: List[Dict[str, Any]],
             "median": None,
             "max": None,
             "near_threshold_frames": 0,
+            "session_reference_used": session_reference_used,
         }
 
     return {
@@ -238,17 +241,20 @@ def _report(records: List[FrameRecord], intervals: List[Dict[str, Any]],
     }
 
 
-def _empty_report(duration_s: float, calibration: Dict[str, bool]) -> Dict[str, Any]:
-    metrics = _metrics([], [], duration_s, config.FRAME_PERIOD_S, calibration)
+def _empty_report(duration_s: float, calibration: Dict[str, bool],
+                  session_reference_used: bool = False) -> Dict[str, Any]:
+    metrics = _metrics([], [], duration_s, config.FRAME_PERIOD_S, calibration,
+                       session_reference_used=session_reference_used)
     face = face_verdict(metrics)
     gaze = gaze_verdict(metrics)
     return _report([], [], metrics, face, gaze, duration_s)
 
 
 def evaluate(records: List[FrameRecord], duration_s: float,
-             calibration: Dict[str, bool]) -> Dict[str, Any]:
+             calibration: Dict[str, bool],
+             session_reference_used: bool = False) -> Dict[str, Any]:
     if not records:
-        return _empty_report(duration_s, calibration)
+        return _empty_report(duration_s, calibration, session_reference_used=session_reference_used)
     period = _period(records)
     duration_s = round(max(duration_s, records[-1].t_s + period), 2)
 
@@ -260,7 +266,8 @@ def evaluate(records: List[FrameRecord], duration_s: float,
     intervals = sorted((iv for t in trackers.values() for iv in t.intervals),
                        key=lambda iv: iv["start_s"])
 
-    metrics = _metrics(records, intervals, duration_s, period, calibration)
+    metrics = _metrics(records, intervals, duration_s, period, calibration,
+                       session_reference_used=session_reference_used)
     face = face_verdict(metrics)
     gaze = gaze_verdict(metrics)
     return _report(records, intervals, metrics, face, gaze, duration_s)

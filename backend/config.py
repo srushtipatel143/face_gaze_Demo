@@ -26,6 +26,9 @@ SFACE_MATCH_THRESHOLD = _f("SFACE_MATCH_THRESHOLD", 0.363)      # current
 SECOND_FACE_MIN_AREA_RATIO = _f("SECOND_FACE_MIN_AREA_RATIO", 0.30)  # new (section 5)
 UNCERTAIN_POSE_DEG = _f("UNCERTAIN_POSE_DEG", 35.0)              # current
 SIMILARITY_NEAR_MARGIN = _f("SIMILARITY_NEAR_MARGIN", 0.05)      # new (section 8)
+SESSION_REFERENCE_ENABLED = os.getenv("SESSION_REFERENCE_ENABLED", "false").lower() in ("true", "1", "yes")
+SESSION_REFERENCE_FRAMES = _i("SESSION_REFERENCE_FRAMES", 5)
+SESSION_REFERENCE_MIN_SIMILARITY = _f("SESSION_REFERENCE_MIN_SIMILARITY", 0.5)
 
 # ---- Reference photo checks ---------------------------------------------------
 REF_MIN_SHARPNESS = _f("REF_MIN_SHARPNESS", 40.0)       # current

@@ -33,6 +33,12 @@ class FrameAnalysis:
     openness: Optional[float] = None
     eyes_open: Optional[bool] = None
     thumbnail: Optional[str] = None                 # small JPEG data URL of the whole frame
+    embedding: Optional[Any] = None                 # live embedding (not stored in records or sent to client)
+
+    def to_dict(self) -> Dict[str, Any]:
+        d = asdict(self)
+        d.pop("embedding", None)
+        return d
 
 
 @dataclass
@@ -60,12 +66,14 @@ class FrameRecord:
                       is_looking_away: Optional[bool], calibrating: bool,
                       thumbnail: Optional[str]) -> "FrameRecord":
         data = asdict(a)
+        data.pop("embedding", None)
         data.update(t_s=t_s, gaze_direction=gaze_direction, is_looking_away=is_looking_away,
                     calibrating=calibrating, thumbnail=thumbnail)
         return cls(**data)
 
     def to_dict(self, include_thumbnail: bool = True) -> Dict[str, Any]:
         d = asdict(self)
+        d.pop("embedding", None)
         if not include_thumbnail:
             d.pop("thumbnail", None)
         return d

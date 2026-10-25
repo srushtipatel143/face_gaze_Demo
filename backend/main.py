@@ -226,13 +226,13 @@ def start_live_verification(req: VerificationStartRequest):
 @app.post("/api/verification/frame", response_model=FrameVerificationResponse)
 def analyze_live_frame(req: FrameVerificationRequest):
     with session_errors():
-        reference = store.get_reference(req.session_id)
+        reference, session_ref = store.get_references(req.session_id)
     try:
         image = decode_base64_image(req.image)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Could not decode frame: {e}")
 
-    analysis = engine.analyze_frame(image, reference)       # no store lock held here
+    analysis = engine.analyze_frame(image, reference, session_ref)       # no store lock held here
 
     with session_errors():
         update = store.add_frame(req.session_id, analysis)
@@ -272,7 +272,8 @@ def stop_live_verification(req: VerificationStopRequest):
         return session.report                      # idempotent: second /stop returns same report
     with session_errors():
         data = store.stop(req.session_id)
-    report = evaluate(data.records, data.duration_s, data.calibration)
+    report = evaluate(data.records, data.duration_s, data.calibration,
+                      session_reference_used=data.session_reference_used)
     report["session_id"] = req.session_id
     report["created_at"] = datetime.fromtimestamp(session.created_at, timezone.utc).isoformat()
     store.set_report(req.session_id, report)

@@ -2,7 +2,9 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
 
 import config
 from intervals import make_trackers, feed_trackers, interval_to_event
@@ -35,12 +37,16 @@ class Session:
     baseline: GazeBaseline = field(default_factory=GazeBaseline)
     live_trackers: Dict[str, Any] = field(default_factory=lambda: make_trackers(config.FRAME_PERIOD_S))
     report: Optional[Dict[str, Any]] = None      # set after /stop
+    session_embedding: Optional[Any] = None      # frozen once built
+    session_embedding_candidates: List[Any] = field(default_factory=list)
 
     def reset_live_state(self) -> None:
         self.records = []
         self.baseline = GazeBaseline()
         self.live_trackers = make_trackers(config.FRAME_PERIOD_S)
         self.report = None
+        self.session_embedding = None
+        self.session_embedding_candidates = []
 
 
 @dataclass
@@ -57,6 +63,7 @@ class StopData:
     records: List[FrameRecord]
     duration_s: float
     calibration: Dict[str, bool]
+    session_reference_used: bool = False
 
 
 class SessionStore:
@@ -87,6 +94,14 @@ class SessionStore:
                 raise SessionNotActive(s.status)
             return s.reference_embedding
 
+    def get_references(self, session_id: str) -> Tuple[Any, Optional[Any]]:
+        with self._lock:
+            s = self._get(session_id)
+            if s.status != "active":
+                raise SessionNotActive(s.status)
+            session_ref = s.session_embedding if (config.SESSION_REFERENCE_ENABLED and s.session_embedding is not None) else None
+            return s.reference_embedding, session_ref
+
     def start(self, session_id: str) -> None:
         with self._lock:
             s = self._get(session_id)
@@ -102,6 +117,22 @@ class SessionStore:
             if s.status != "active":
                 raise SessionNotActive(s.status)     # frame arrived after /stop: rejected
             t_s = round(time.monotonic() - s.start_monotonic, 3)
+
+            # Session reference embedding: accumulate candidate frames and freeze once ready
+            if s.session_embedding is None and a.embedding is not None:
+                sim = a.similarity if a.similarity is not None else 0.0
+                if (a.identity == MATCH and a.faces_detected == 1
+                        and sim >= config.SESSION_REFERENCE_MIN_SIMILARITY):
+                    s.session_embedding_candidates.append(a.embedding)
+                    if len(s.session_embedding_candidates) >= config.SESSION_REFERENCE_FRAMES:
+                        normalized = []
+                        for emb in s.session_embedding_candidates:
+                            arr = np.asarray(emb, dtype=np.float32).flatten()
+                            norm = float(np.linalg.norm(arr))
+                            normalized.append(arr / norm if norm > 1e-6 else arr)
+                        mean_emb = np.mean(normalized, axis=0)
+                        mean_norm = float(np.linalg.norm(mean_emb))
+                        s.session_embedding = mean_emb / mean_norm if mean_norm > 1e-6 else mean_emb
 
             gaze_valid = (a.faces_detected == 1 and a.eyes_open is True
                           and a.yaw is not None and a.pitch is not None)
@@ -165,8 +196,10 @@ class SessionStore:
                 raise SessionCompleted(session_id)
             duration = (time.monotonic() - s.start_monotonic) if s.start_monotonic else 0.0
             s.status = "completed"
+            ref_used = bool(config.SESSION_REFERENCE_ENABLED and s.session_embedding is not None)
             return StopData(records=list(s.records), duration_s=round(duration, 2),
-                            calibration=s.baseline.summary())
+                            calibration=s.baseline.summary(),
+                            session_reference_used=ref_used)
 
     def set_report(self, session_id: str, report: Dict[str, Any]) -> None:
         with self._lock:

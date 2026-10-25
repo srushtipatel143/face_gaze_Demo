@@ -128,7 +128,8 @@ class VisionEngine:
             refine_landmarks=True, min_detection_confidence=0.5,
         )
 
-    def analyze_frame(self, image: np.ndarray, reference_embedding: Any) -> FrameAnalysis:
+    def analyze_frame(self, image: np.ndarray, reference_embedding: Any,
+                      session_reference: Optional[Any] = None) -> FrameAnalysis:
         h, w = image.shape[:2]
         thumb = make_thumbnail(image)
         with self._lock:
@@ -142,6 +143,9 @@ class VisionEngine:
                                      face_box=box, thumbnail=thumb)
             live = self.face.embed(image, main)
             similarity = self.face.similarity(reference_embedding, live)
+            if session_reference is not None:
+                sim_session = self.face.similarity(session_reference, live)
+                similarity = max(similarity, sim_session)
             mesh_results = self.mesh.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
 
         landmarks = pick_landmarks(mesh_results, box, w, h)
@@ -161,7 +165,7 @@ class VisionEngine:
         return FrameAnalysis(
             faces_detected=1, identity=identity, similarity=round(similarity, 4),
             face_box=box, yaw=yaw, pitch=pitch, roll=roll, iris_h=iris_h, iris_v=iris_v,
-            openness=openness, eyes_open=eyes_open, thumbnail=thumb,
+            openness=openness, eyes_open=eyes_open, thumbnail=thumb, embedding=live,
         )
 
     def analyze_reference(self, image: np.ndarray) -> Dict[str, Any]:
