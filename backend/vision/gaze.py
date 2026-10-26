@@ -22,7 +22,7 @@ MODEL_POINTS_3D = np.array([
 def estimate_head_pose(landmarks, img_w: int, img_h: int) -> Tuple[float, float, float]:
     """
     Estimate pitch, yaw, and roll in degrees using SolvePnP on key facial landmarks.
-    Pitch: positive = looking up, negative = looking down.
+    Pitch: positive = looking down, negative = looking up.
     Yaw: positive = turned right, negative = turned left.
     """
     pts = landmarks.landmark
@@ -54,7 +54,7 @@ def estimate_head_pose(landmarks, img_w: int, img_h: int) -> Tuple[float, float,
     rmat, _ = cv2.Rodrigues(rvec)
     angles, _, _, _, _, _ = cv2.RQDecomp3x3(rmat)
 
-    pitch = -float(angles[0])
+    pitch = float(angles[0])
     yaw = float(angles[1])
     roll = float(angles[2])
 
